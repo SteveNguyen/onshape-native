@@ -31,7 +31,7 @@ The same tool retrieves every other detail:
 | Camera acknowledgement | `artifact` | `/camera` |
 | General API read | `artifact` | Returned child pointer or `""` |
 
-The authenticated local HTTP equivalent is `POST /local/artifact_page`, with the same JSON arguments and existing bridge Bearer authentication. No extra retrieval routes/tools are required.
+The authenticated local HTTP equivalent is `POST /local/artifact_page`, with the same JSON arguments and signed bridge authentication (`scripts/request.py`). No extra retrieval routes/tools are required.
 
 ## What changes by default
 

@@ -69,6 +69,16 @@ test('REST preserves errors and download metadata without forwarding CSRF on GET
   assert.equal(request.redirect,'error');assert.equal(request.headers['X-XSRF-TOKEN'],'test-cookie');
 });
 
+test('page and extension REST refuse non-canonical paths before fetching',async()=>{
+  setup();globalThis.document={cookie:''};
+  const {restGet}=await import('../extension/rest-get.js');
+  globalThis.fetch=async()=>assert.fail('must not fetch');
+  for (const path of ['/api/v6/documents;x=1','/api/v6/documents/a%252Fb','/api/v6/docu\tments','/api/v6/documents%09','/api/v6/x%5Cy','/api/v6/x%3Fy']) {
+    assert.match((await pageCommand({kind:'rest',path,method:'GET'})).error,/Invalid API path/,path);
+    await assert.rejects(restGet({kind:'rest',method:'GET',path}),/Invalid API path/,path);
+  }
+});
+
 test('runtime rejection returns a structured diagnostic rather than a discarded promise',async()=>{
   setup();delete globalThis.webpackChunkNewton;
   const result=await pageCommand({kind:'state',target});assert.match(result.error,/runtime unavailable/);assert.match(result.outcome,/Inspect/);
@@ -97,6 +107,29 @@ test('missing controller export and accessor fail before native RPC',async()=>{
     const result=await pageCommand({kind:'native',target,command:'partstudiofolders.GBTUiCreateFolder',body:{},expected_microversion:micro});
     assert.match(result.error,/87539:controller-accessor-missing/);assert.equal(sent.length,0);
   }
+});
+test('untested schema-only native commands require the policy opt-in',async()=>{
+  const modules=setup();
+  modules[27940].Untested=class{constructor(){this.messageId='';}getMessageName(){return 'ui.GBTUiUntestedCall';}getClassId(){return 1;}};
+  const job={kind:'native',target,command:'ui.GBTUiUntestedCall',body:{},expected_microversion:micro};
+  assert.match((await pageCommand(job)).error,/untested.*popup/i);assert.equal(sent.length,0);
+  await pageCommand({...job,allow_untested_native:true});assert.equal(sent.length,1);
+  await pageCommand({...job,command:'partstudiofolders.GBTUiCreateFolder'});assert.equal(sent.length,2);
+});
+test('ui_action refuses admin-looking controls unless the worker allowed admin',async()=>{
+  setup();
+  const act=async(label,admin_allowed)=>{
+    let clicked=false;
+    const el={isConnected:true,disabled:false,textContent:label,getClientRects:()=>[1],matches:()=>false,getAttribute:()=>null,focus(){},click(){clicked=true;}};
+    globalThis.__onshapeNativeUI={snapshot:'s',nodes:[el],pathname:globalThis.location.pathname,created:Date.now()};
+    const result=await pageCommand({kind:'ui_action',target,snapshot:'s',control:0,action:'click',expected_microversion:micro,admin_allowed});
+    return {result,clicked};
+  };
+  for (const label of ['Share','Make public','Manage permissions','Delete document','Transfer ownership','Webhooks']) {
+    const {result,clicked}=await act(label,undefined);assert.match(result.error,/admin/i,label);assert.equal(clicked,false);
+  }
+  assert.equal((await act('Share',true)).clicked,true);
+  assert.equal((await act('Extrude',false)).clicked,true);
 });
 test('missing message classes fail before native RPC',async()=>{
   const modules=setup(undefined,true);delete modules[96402].CJP;

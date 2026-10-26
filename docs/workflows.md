@@ -90,7 +90,9 @@ custom modeling requires a Feature Studio definition and instantiated feature,
 using the corresponding REST operations. Do not report evaluated geometry as a
 saved model edit.
 
-For imports use `api_upload` with the exact multipart schema. Poll asynchronous
+For imports use `api_upload` with the exact multipart schema; source files must
+be inside the runtime `uploads` directory (the error prints its path; ask the
+user to place files there). Poll asynchronous
 translation IDs with read operations; do not replay the creation request. For
 exports use the documented synchronous endpoint or create a translation, poll
 until complete, and download the returned result. Binary output becomes a private

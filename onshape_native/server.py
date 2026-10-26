@@ -4,6 +4,8 @@ from __future__ import annotations
 import base64
 import io
 import math
+import os
+import stat
 from contextlib import asynccontextmanager
 from typing import Literal, Any
 from pathlib import Path
@@ -19,7 +21,8 @@ from .native_catalog import catalog as native_commands, READS
 from .discovery import index as command_index
 from .structure_service import Structures
 from .client import OnshapeError
-from .geometry import SUMMARY_SCRIPT, measurement_script, topology_script
+from .config import runtime_dir
+from .geometry import SUMMARY_SCRIPT, face_plane_script, face_query, measurement_script, section_script, topology_script, view_matrix
 from .service import Service
 from .store import compact
 from .responses import respond
@@ -157,13 +160,18 @@ async def inspect_model(url: str, geometry: bool = True, previous: str | None = 
 
 
 @mcp.tool(structured_output=False, annotations=READ)
-async def evaluate(snapshot: str, preset: Literal["summary", "select", "measure", "topology", "custom"] = "summary",
+async def evaluate(snapshot: str, preset: Literal["summary", "select", "measure", "topology", "section", "custom"] = "summary",
                    expression: str = "", script: str = "", expected_count: int | None = None,
-                   metrics: list[str] | None = None, other_expression: str = "", offset: int = 0, limit: int = 20) -> str:
-    """Query immutable geometry. select returns IDs/count for a FeatureScript Query. measure batches bounds/volume/area/length/plane/distance (mm); distance needs other_expression. topology pages face types, axes/normals, areas and adjacency. custom evaluates a lambda. No persistent changes."""
+                   metrics: list[str] | None = None, other_expression: str = "", offset: int = 0, limit: int = 20,
+                   plane: dict | None = None) -> str:
+    """Query immutable geometry. select returns IDs/count for a FeatureScript Query. measure batches bounds/volume/area/length/plane/distance (mm); distance needs other_expression. topology pages solid-body face types, axes/normals, areas and adjacency. section cuts solid bodies exactly with plane {origin_mm, normal} or expression (one face/default plane Query or face ID: its tangent plane at the centroid) and pages regions: area_mm2, centroid, extents and per-edge boundary polylines in plane (u,v) mm; u/v follow render_views' view of that normal (up = world Z, or ±Y for a vertical normal). custom evaluates a lambda. Everything runs in a temporary evaluation context: no persistent changes."""
     s = svc()
     data = s.snapshot_data(snapshot)
-    if preset == "summary":
+    queries = {}
+    if preset == "section":
+        face, queries = face_query(expression) if expression else (None, {})
+        script = section_script(face, plane, offset, limit)
+    elif preset == "summary":
         script = SUMMARY_SCRIPT
     elif preset == "select":
         if not expression:
@@ -175,7 +183,7 @@ async def evaluate(snapshot: str, preset: Literal["summary", "select", "measure"
         script = topology_script(expression, offset, limit)
     elif not script.strip().startswith("function"):
         raise OnshapeError("custom requires a FeatureScript lambda: function(context is Context, queries) { ... }")
-    result = await s.eval(data, script)
+    result = await s.eval(data, script, queries)
     if preset in ("select", "measure") and isinstance(result.get("result"), dict) and expected_count is not None:
         result["cardinality_ok"] = result["result"].get("count") == expected_count
         if not result["cardinality_ok"]:
@@ -235,28 +243,56 @@ async def sidebar_verify(plan: str, browser_observation: str = "", tolerance_mm:
 
 
 @mcp.tool(structured_output=False, annotations=READ)
-async def render_views(snapshot: str, views: list[str] | None = None, size: int = 384, pixel_size_mm: float | None = None) -> list:
-    """Optional Onshape-native views, labeled in one image. Default front/top/right. Use only for unresolved visual questions; prefer headless measurements. Each view costs an API call. No screenshot/browser required."""
+async def render_views(snapshot: str = "", views: list[str | dict] | None = None, size: int = 384, pixel_size_mm: float | None = None, url: str = "") -> list:
+    """Server-rendered Onshape shaded views labeled in one image (default front/top/right); never changes the browser view. Part Studio: snapshot from inspect_model. Assembly: url instead of snapshot. Each of 1-4 views: a named view (front/back/top/bottom/left/right/isometric); {direction:[x,y,z] pointing from model to viewer, up?:[x,y,z]} (default up world Z, or ±Y looking along Z; centered on the model bounds); or {face: Part Studio Query or face ID} (looking at the face along its outward normal, framed on the face unless pixel_size_mm is given). Prefer headless measurements; each view costs an API call."""
     s = svc()
-    data = s.snapshot_data(snapshot)
+    if bool(snapshot) == bool(url):
+        raise OnshapeError("Give a Part Studio snapshot or an assembly url.")
+    if snapshot:
+        data = s.snapshot_data(snapshot)
+        operation, path, configuration = "getPartStudioShadedViews", s.pinned(data), data["configuration"]
+        boxes = [(p["min_mm"], p["max_mm"]) for p in data.get("solids", [])]
+        heading = "Microversion " + data["microversion"]
+    else:
+        path, configuration = s.target(url)
+        operation, heading = "getAssemblyShadedViews", "Assembly " + path["wvm"] + "/" + path["wvmid"]
+        b = await s.call("getAssemblyBoundingBoxes", path, {"configuration": configuration})
+        boxes = [([b["lowX"] * 1000, b["lowY"] * 1000, b["lowZ"] * 1000], [b["highX"] * 1000, b["highY"] * 1000, b["highZ"] * 1000])] if "lowX" in b else []
     views = views or ["front", "top", "right"]
-    if not 1 <= len(views) <= 4 or any(v not in ("front", "back", "top", "bottom", "left", "right", "isometric") for v in views):
-        raise OnshapeError("Choose 1-4 standard views.")
+    if not 1 <= len(views) <= 4:
+        raise OnshapeError("Choose 1-4 views.")
     if not 256 <= size <= 768:
         raise OnshapeError("size must be 256-768 pixels.")
-    # Conservative world-origin framing; custom centers/matrices use api_read.
+    # Conservative world-origin framing for named views; matrix views center the bounds.
     # This avoids the API's fixed default zoom hiding small parts.
-    if pixel_size_mm is None:
-        radii = [math.sqrt(sum(max(abs(p["min_mm"][i]), abs(p["max_mm"][i])) ** 2 for i in range(3)))
-                 for p in data.get("solids", [])]
-        pixel_size_mm = max(1e-6, 2.3 * max(radii) / size) if radii else 3.0
-    if not math.isfinite(pixel_size_mm) or pixel_size_mm <= 0:
+    radii = [math.sqrt(sum(max(abs(lo[i]), abs(hi[i])) ** 2 for i in range(3))) for lo, hi in boxes]
+    default_px = pixel_size_mm if pixel_size_mm is not None else max(1e-6, 2.3 * max(radii) / size) if radii else 3.0
+    if not math.isfinite(default_px) or default_px <= 0:
         raise OnshapeError("pixel_size_mm must be a finite positive number.")
+    center = [(min(lo[i] for lo, _ in boxes) + max(hi[i] for _, hi in boxes)) / 2000 for i in range(3)] if boxes else [0, 0, 0]
     images = []
     for view in views:
-        raw = await s.call("getPartStudioShadedViews", s.pinned(data),
-                           {"configuration": data["configuration"], "viewMatrix": view,
-                            "outputWidth": size, "outputHeight": size, "pixelSize": pixel_size_mm / 1000, "showAllParts": True,
+        px = default_px
+        if isinstance(view, str) and view in ("front", "back", "top", "bottom", "left", "right", "isometric"):
+            matrix, label = view, view.upper()
+        elif isinstance(view, dict) and "direction" in view and set(view) <= {"direction", "up"}:
+            matrix, label = view_matrix(view["direction"], view.get("up"), center), "DIR " + ",".join(f"{x:g}" for x in view["direction"])
+        elif isinstance(view, dict) and set(view) == {"face"} and snapshot:
+            expression, queries = face_query(view["face"])
+            face = (await s.eval(data, face_plane_script(expression), queries)).get("result")
+            if not isinstance(face, dict) or face.get("count") != 1:
+                raise OnshapeError(f"face must resolve to exactly one face (got {(face or {}).get('count')}).")
+            matrix = view_matrix(face["normal"], None, [(a + b) / 2 for a, b in zip(face["min"], face["max"])])
+            if pixel_size_mm is None:
+                px = max(1e-6, 1200 * math.dist(face["min"], face["max"]) / size)
+            label = "FACE " + view["face"][:24]
+        else:
+            raise OnshapeError("Each view is a named view, {direction, up?} or {face} (Part Studio snapshot only).")
+        if not isinstance(matrix, str):
+            matrix = ",".join(f"{x:.12g}" for x in matrix)
+        raw = await s.call(operation, path,
+                           {"configuration": configuration, "viewMatrix": matrix,
+                            "outputWidth": size, "outputHeight": size, "pixelSize": px / 1000, "showAllParts": True,
                             "includeSurfaces": True, "useAntiAliasing": True})
         candidates = raw.get("images", [])
         while candidates and isinstance(candidates[0], list):
@@ -267,12 +303,12 @@ async def render_views(snapshot: str, views: list[str] | None = None, size: int 
         image.thumbnail((size, size))
         panel = Image.new("RGB", (size, size + 32), "white")
         panel.paste(image, ((size-image.width)//2, 32), image)
-        ImageDraw.Draw(panel).text((12, 8), view.upper() + " | Onshape world", fill="black", font_size=16)
+        ImageDraw.Draw(panel).text((12, 8), label + " | Onshape world", fill="black", font_size=16)
         images.append(panel)
     sheet = Image.new("RGB", (size * len(images), size + 56), "white")
     for i, img in enumerate(images):
         sheet.paste(img, (i * size, 24))
-    ImageDraw.Draw(sheet).text((12, 4), "Microversion " + data["microversion"] + " | Visual reference; measure with evaluate", fill="black", font_size=14)
+    ImageDraw.Draw(sheet).text((12, 4), heading + " | Visual reference; measure with evaluate", fill="black", font_size=14)
     stream = io.BytesIO()
     sheet.save(stream, format="PNG")
     raw = stream.getvalue()
@@ -336,10 +372,49 @@ async def native_write(url: str, command: str, body: dict, expected_microversion
     return compact(svc().store.response(data))
 
 
+MAX_UPLOAD = 64 * 1024 * 1024
+
+
+def upload_source(path: str) -> tuple[Path, bytes]:
+    """Resolve and read an upload source inside the private uploads directory.
+
+    A prompt-injected agent could otherwise exfiltrate any readable local file
+    (keys, the bridge token) to Onshape, so only files the user placed there qualify.
+    Reads from the checked descriptor: a hard link to an outside file has no symlink
+    to resolve, and a swap after the check must not change what is sent."""
+    uploads = runtime_dir() / "uploads"
+    uploads.mkdir(mode=0o700, parents=True, exist_ok=True)
+    base = uploads.resolve()
+    file = (base / Path(path).expanduser()).resolve()  # absolute paths replace base
+    refused = OnshapeError(f"Upload sources must be regular, non-hidden, singly linked files inside {base}. "
+                           "Ask the user to place the file in that directory, then pass its name.")
+    if not file.is_relative_to(base) or any(part.startswith(".") for part in file.relative_to(base).parts):
+        raise refused
+    try:
+        fd = os.open(file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise refused from None
+    try:
+        info = os.fstat(fd)
+        try:
+            same = os.path.samestat(info, os.stat(file)) and file.resolve().is_relative_to(base)
+        except OSError:
+            same = False
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not same:
+            raise refused
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            data = stream.read(MAX_UPLOAD + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_UPLOAD:
+        raise OnshapeError("Upload exceeds 64 MiB.")
+    return file, data
+
+
 @mcp.tool(structured_output=False, annotations=WRITE)
 async def api_upload(operation: str, files: list[dict], path: dict[str, str] | None = None,
                      query: dict | None = None, fields: dict | None = None) -> str:
-    """Execute a multipart API operation (imports, blob uploads, comment attachments, material-library uploads). files entries: {field,path,filename?,content_type?}; paths are local files. Schema-discover fields first. Up to 64 MiB total; no write retries."""
+    """Execute a multipart API operation (imports, blob uploads, comment attachments, material-library uploads). files entries: {field,path,filename?,content_type?}; path is a file name inside the runtime uploads directory (absolute paths must also be inside it; anything else is refused and the error names the directory the user must place files in). Schema-discover fields first. Up to 64 MiB total; no write retries."""
     s = svc()
     schema = s.catalog.schema(operation)
     if "multipart/form-data" not in (schema.get("requestBody") or {}).get("content", {}):
@@ -349,13 +424,11 @@ async def api_upload(operation: str, files: list[dict], path: dict[str, str] | N
         raise OnshapeError("Supply 1-20 files.")
     entries, total = [], 0
     for item in files:
-        file = Path(item["path"]).expanduser().resolve()
-        if not file.is_file():
-            raise OnshapeError("Upload source must be a local regular file.")
-        total += file.stat().st_size
-        if total > 64 * 1024 * 1024:
+        file, data = upload_source(item["path"])
+        total += len(data)
+        if total > MAX_UPLOAD:
             raise OnshapeError("Upload exceeds 64 MiB.")
-        entries.append((item["field"], (item.get("filename", file.name), file.read_bytes(),
+        entries.append((item["field"], (item.get("filename", file.name), data,
                         item.get("content_type") or mimetypes.guess_type(file.name)[0] or "application/octet-stream")))
     # httpx supplies correct multipart boundaries and binary-safe encoding.
     form = httpx.Request(method, "http://127.0.0.1/", data=fields or {}, files=entries)
@@ -373,7 +446,7 @@ async def open_document(url: str) -> str:
 
 @mcp.tool(structured_output=False, annotations=READ)
 async def ui_inspect(url: str, tab_id: int | None = None) -> str:
-    """Fallback only: inspect visible form controls when no backend command exists. Returns short-lived control handles; no screenshots, input values, or executable code. Prefer native_catalog and api_catalog."""
+    """Fallback only: inspect visible form controls when no backend command exists. Disabled unless the user enables "Advanced: allow UI fallback clicks" in the extension popup; if refused, ask the user. Returns short-lived control handles; no screenshots, input values, or executable code. Prefer native_catalog and api_catalog."""
     data = await svc().client.command({"kind": "ui_inspect", "target": native_target(url), "tab_id": tab_id})
     return compact(svc().store.response(data))
 
@@ -381,7 +454,7 @@ async def ui_inspect(url: str, tab_id: int | None = None) -> str:
 @mcp.tool(structured_output=False, annotations=WRITE)
 async def ui_action(url: str, snapshot: str, control: int, action: Literal["click", "double_click", "context_menu", "fill", "select"],
                     expected_microversion: str, backend_unavailable_reason: str, value: str = "", tab_id: int | None = None) -> str:
-    """Fallback for a UI-only action. Requires a fresh ui_inspect snapshot, control handle, revision, and explanation why backend commands cannot do it. One action consumes the snapshot. Synthetic events may be refused: inspect the result. Extrusion/material/mate edits use native commands instead."""
+    """Fallback for a UI-only action. Disabled unless the user enables "Advanced: allow UI fallback clicks" in the extension popup. Requires a fresh ui_inspect snapshot, control handle, revision, and explanation why backend commands cannot do it. One action consumes the snapshot. Synthetic events may be refused: inspect the result. Extrusion/material/mate edits use native commands instead."""
     return compact(await svc().client.command({"kind": "ui_action", "target": native_target(url), "tab_id": tab_id,
         "snapshot": snapshot, "control": control, "action": action, "value": value,
         "expected_microversion": expected_microversion, "backend_unavailable_reason": backend_unavailable_reason}))
@@ -446,16 +519,23 @@ async def mate_animation(url: str, action: Literal['prepare','start','stop','ste
 
 
 @mcp.tool(structured_output=False, annotations=DISPLAY_WRITE)
-async def view_control(url: str, action: Literal['read','save','restore','standard','orientation','fit','zoom'],
+async def view_control(url: str, action: Literal['read','save','restore','standard','orientation','fit','zoom','normal_to','section','section_off',
+                                                 'isolate','exit_isolate','make_transparent','exit_make_transparent'],
                        tab_id: int | None = None, expected_microversion: str = '',
                        view: Literal['front','back','left','right','top','bottom','isometric'] = 'isometric',
                        frame: list[float] | None = None, fit: bool = True,
-                       occurrence_paths: list[list[str]] | None = None, camera_id: str = '', extents: list[float] | None = None, detail: Literal['summary','full'] = 'summary') -> str:
-    """Read/control the actual editor camera, fit the model, or zoom to exact assembly occurrence paths. save returns a camera_id for restore in the same tab, including zoom. Writes require a fresh microversion and return observed camera state. orientation takes a right-handed orthonormal 4x4 column-major camera frame (right/up/back columns, eye in meters), not a world-to-camera view matrix. fit=true also fits standard/orientation views. With fit=false, optional orthographic extents from readback restore scale after reload, adjusted to viewport aspect ratio. Works on Part Studios and assemblies. Compact acknowledgements save full camera state for artifact_page; read or detail=full includes matrices. No button clicks."""
-    from .display import Display
+                       occurrence_paths: list[list[str]] | None = None, camera_id: str = '', extents: list[float] | None = None,
+                       plane: dict | None = None, face: str = '', part_ids: list[str] | None = None, detail: Literal['summary','full'] = 'summary') -> str:
+    """Read/control the actual editor camera, fit the model, or zoom to exact assembly occurrence paths. save returns a camera_id for restore in the same tab, including zoom. Writes require a fresh microversion and return observed camera state. orientation takes a right-handed orthonormal 4x4 column-major camera frame (right/up/back columns, eye in meters), not a world-to-camera view matrix. fit=true also fits standard/orientation/normal_to views. With fit=false, optional orthographic extents from readback restore scale after reload, adjusted to viewport aspect ratio. Works on Part Studios and assemblies. Compact acknowledgements save full camera state for artifact_page; read or detail=full includes matrices. No button clicks.
+normal_to/section take plane {origin:[x,y,z] meters or "center" (this element's bounding-box centre), normal, x_dir?} or face (Part Studio FeatureScript Query or face ID, e.g. qCreatedBy(makeId("Top"), EntityType.FACE)); a face uses its tangent plane at the centroid, outward normal. normal_to looks against the normal (from its + side) via Onshape's normal-to camera. section sets Onshape's graphical section with one plane (material on the + normal side stays), saving the prior section planes once; section_off restores them. isolate/make_transparent take assembly occurrence_paths or Part Studio part_ids; exit_isolate/exit_make_transparent restore. Always restore before finishing."""
+    from .display import Display, resolve_plane
     args={'action':action}
     if action=='standard': args.update(view=view,fit=fit)
     if action=='orientation': args.update(frame=frame,fit=fit)
+    if action in ('normal_to','section'): args['plane']=await resolve_plane(svc(),url,plane,face,expected_microversion)
+    if action=='normal_to': args['fit']=fit
+    if action in ('isolate','make_transparent'):
+        args.update({'part_ids':part_ids} if part_ids is not None else {'occurrence_paths':occurrence_paths})
     if extents is not None: args['extents']=extents
     if action=='zoom': args['occurrence_paths']=occurrence_paths
     if action=='restore': args['camera_id']=camera_id

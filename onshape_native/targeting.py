@@ -11,22 +11,33 @@ def resolve_context(url="", tab_id=None, context=None):
     tabs = context.get("tabs", [])
     candidates = []
     for tab in tabs:
+        # The extension withholds URL and title of unauthorized tabs; it reports their did.
+        if tab.get("authorized") is False:
+            if tab.get("did"):
+                candidates.append({key: tab.get(key) for key in ("id", "did", "active", "window_id", "authorized")})
+            continue
         try:
             target_from_url(tab.get("url", ""))
         except (OnshapeError, ValueError):
             continue
-        candidates.append({key: tab.get(key) for key in ("id", "title", "url", "active", "window_id")})
+        candidates.append({key: tab.get(key) for key in ("id", "title", "url", "active", "window_id", "authorized")})
 
     def unresolved(reason):
         return {"status": "needs_selection", "reason": reason, "candidates": candidates[:50],
                 "candidate_count": len(candidates),
                 "next": "Supply an exact Onshape URL or tab_id. Do not choose a background tab on the user's behalf."}
 
+    def needs_authorization(tab):
+        return {"status": "needs_authorization", "tab_id": tab.get("id"), "did": tab.get("did"),
+                "next": "Ask the user to authorize this document in the Onshape Native extension popup, then resolve again."}
+
     selected = None
     if tab_id is not None:
         selected = next((tab for tab in tabs if tab.get("id") == tab_id), None)
         if selected is None:
             return unresolved("The requested tab is no longer available in the connected browser.")
+        if selected.get("authorized") is False:
+            return needs_authorization(selected)
         try:
             tab_target = target_from_url(selected.get("url", ""))
         except (OnshapeError, ValueError):
@@ -42,6 +53,8 @@ def resolve_context(url="", tab_id=None, context=None):
             return unresolved("The last-focused browser window has no single active Onshape tab.")
         selected = active[0]
 
+    if selected is not None and selected.get("authorized") is False:
+        return needs_authorization(selected)
     source = "url" if explicit is not None else "tab_id" if tab_id is not None else "current_tab"
     resolved_url = url.strip() if explicit is not None else selected["url"]
     try:

@@ -16,8 +16,8 @@ export async function displayCommand(job) {
   if (chunks.at(-1)?.[0]?.[0] === marker) chunks.pop();
   if (typeof require !== "function") throw new Error("Onshape webpack runtime is not initialized; wait for the editor.");
   const profiles = [
-    {classes:96402, controller:87539, registry:49857, sidebar:65443},
-    {classes:27940, controller:3392, registry:45867, sidebar:64725}
+    {classes:96402, controller:87539, registry:49857, sidebar:65443, webgl:41413},
+    {classes:27940, controller:3392, registry:45867, sidebar:64725, webgl:null}
   ];
   let profile, classes, controllerType;
   const failures = [];
@@ -170,6 +170,71 @@ export async function displayCommand(job) {
       if (!session.poseVerified) throw new Error('Preview transform readback differs from solver frame. Restore the session.');
       return true;
     };
+    // Camera back axis (column 2) along the plane normal: viewing from the + side.
+    const facing = (frame,n) => frame[8]*n[0]+frame[9]*n[1]+frame[10]*n[2] > 0;
+    const near = (a,b) => a.length===b.length && a.every((v,i)=>Math.abs(v-b[i])<1e-6);
+    // Section helpers from the webgl barrel (getActiveSectionViewState, get/setFromSerializablePlaneData).
+    const section = () => {
+      let api; try { api = profile.webgl && require(profile.webgl); } catch {}
+      if (!['aL7','ejz','Q0t'].every(k => typeof api?.[k] === 'function'))
+        throw new Error(`Unsupported Onshape frontend build [section-helpers-missing:${profile.webgl}]. Re-capture bundle evidence.`);
+      const element = api.aL7()?.getElementId?.();
+      if (element && element !== target.eid) throw new Error('Section state belongs to another element. Activate the target element.');
+      const xyz = v => ({x:v[0],y:v[1],z:v[2]}), arr = v => [v.x,v.y,v.z];
+      const read = () => api.ejz().map(p => ({origin:arr(p.center),normal:arr(p.normal),x_dir:arr(p.tangent)}));
+      const key = '__onshapeNativeSectionV1';
+      let saved = controller[key]?.path === path ? controller[key] : null;
+      if (args.action === 'section') {
+        if (!viewer.supportsGraphicalSectionPlanes()) throw new Error('This viewer does not support graphical section planes.');
+        // Keep the first saved state across repeated sections so section_off returns to it.
+        if (!saved) saved = controller[key] = {path, planes:read()};
+      } else if (!saved) throw new Error('No saved section state in this tab; nothing to restore.');
+      const wanted = args.action === 'section' ? [args.plane] : saved.planes;
+      api.Q0t(wanted.map(p => ({center:xyz(p.origin),normal:xyz(p.normal),tangent:xyz(p.x_dir)})), controller.getElementConnection(), viewer);
+      viewer.draw();
+      const planes = read();
+      const verified = planes.length === wanted.length && planes.every((p,i) => ['origin','normal','x_dir'].every(k => near(p[k],wanted[i][k])));
+      if (args.action === 'section_off' && verified) delete controller[key];
+      return {section_planes:planes, saved_planes:saved.planes, verified, microversion:micro(),
+        scope:'Graphical section of this tab only; the model is unchanged.'};
+    };
+    // Onshape's isolate/make-transparent managers, called as its context-menu handlers do.
+    const isolation = () => {
+      const iso = viewer.getIsolatedOccurrenceManager?.();
+      if (!iso?.currentIsolateManager) throw new Error('Onshape isolate manager is unavailable in this viewer.');
+      const transparent = args.action.endsWith('make_transparent'), exit = args.action.startsWith('exit_');
+      let requested = [];
+      if (exit) {
+        if (transparent) { iso.currentMakeTransparentManager?.clearTransparentNoAnimation(); if (iso.currentMakeTransparentManager) iso.removeMakeTransparentManager(); }
+        else iso.currentIsolateManager.clearIsolateNoAnimation();
+      } else {
+        if (transparent ? iso.isInIsolateMode() : iso.isInMakeTransparentMode()) throw new Error('Exit the active isolate/make-transparent mode first.');
+        if (viewer.isIsolateEffectInUseForVisualization()) throw new Error('Another visualization uses isolation; close it first.');
+        if (model.isAssembly()) {
+          if (!args.occurrence_paths) throw new Error('Assemblies take occurrence_paths.');
+          const occs = args.occurrence_paths.map(occurrence);
+          if (occs.some(o => !manager.getOccurrencesStartingWithPath(o)?.length)) throw new Error('Occurrence is absent from the viewer. Read display_state.');
+          if (transparent && !iso.currentMakeTransparentManager) iso.onMakeTransparentComponents(null, false, null, viewer);
+          const effect = transparent ? iso.currentMakeTransparentManager : iso.currentIsolateManager;
+          for (const o of occs) effect.affectId(o);
+          requested = occs.map(o => o.getPathAsString());
+        } else {
+          if (!args.part_ids) throw new Error('Part Studios take part_ids.');
+          const bodies = manager.getDisplayedPartStudio()?.getBodyComponent();
+          if (args.part_ids.some(id => !bodies?.getBodyOccurrenceData(id))) throw new Error('Part is absent from the viewer. Use part IDs from inspect_model.');
+          const parts = args.part_ids.map(id => ({id}));  // Onshape's affectParts reads only part.id
+          if (transparent && !iso.currentMakeTransparentManager) iso.onMakeTransparentParts(parts, viewer);
+          else (transparent ? iso.currentMakeTransparentManager : iso.currentIsolateManager).affectParts(parts, viewer);
+          requested = args.part_ids;
+        }
+      }
+      viewer.draw();
+      const ids = iso.getAffectedPartIdsOrOccurrences() ?? [];
+      const state = {isolate:!!iso.isInIsolateMode(), make_transparent:!!iso.isInMakeTransparentMode(), affected:ids instanceof Map ? [...ids.keys()] : [...ids]};
+      const active = transparent ? state.make_transparent : state.isolate;
+      return {isolation:state, requested, verified: exit ? !active : active && requested.every(r => state.affected.includes(r)), microversion:micro(),
+        scope:'Temporary display effect of this tab; excluded from display_state visibility.'};
+    };
     if (operation === 'inspect') return displayState();
     if (operation === 'visibility') {
       assertRevision();
@@ -211,7 +276,21 @@ export async function displayCommand(job) {
     if (operation === 'camera') {
       if(args.action==='read') return {camera:cameraState(),microversion:micro()};
       assertRevision();
+      if(args.action==='section'||args.action==='section_off') return section();
+      if(['isolate','make_transparent','exit_isolate','exit_make_transparent'].includes(args.action)) return isolation();
       const view=viewer.getPrimaryViewController();
+      if(args.action==='normal_to') {
+        // The camera calls of Onshape's animateViewNormalToPlaneMatrix, applied without
+        // animation. Plane matrix is column-major: x_dir, normal × x_dir, normal, origin (m).
+        const {origin,normal:n,x_dir:x}=args.plane, camera=viewer.getCamera();
+        const matrix=[...x,0,n[1]*x[2]-n[2]*x[1],n[2]*x[0]-n[0]*x[2],n[0]*x[1]-n[1]*x[0],0,...n,0,...origin,1];
+        const center=camera.viewportToCanvas([camera.getViewportWidth()/2,camera.getViewportHeight()/2,0]);
+        let next=camera.getCameraRotatedToViewAndTranslated(matrix,origin,center,false);
+        // Onshape keeps the closest in-plane orientation, which can look from behind the
+        // plane; its own flipNormalIfIdentical (the repeated Normal-to) turns it around.
+        if(!facing(next.getFrame(),n)) next=next.getCameraRotatedToViewAndTranslated(matrix,origin,center,true);
+        viewer.getCamera().copyFrom(next);
+      }
       if(args.action==='save') {
         const saved={id:crypto.randomUUID(),path,camera:viewer.getCamera().clone()};
         controller.__onshapeNativeCameraV1=saved;
@@ -231,7 +310,7 @@ export async function displayCommand(job) {
         camera.setFrame(args.frame);
         if(args.extents) camera.setExtents(args.extents);
       }
-      else if(args.action!=='fit' && args.action!=='zoom') throw new Error('Unknown camera action.');
+      else if(!['fit','zoom','normal_to'].includes(args.action)) throw new Error('Unknown camera action.');
       if(args.action==='fit'||args.action==='zoom'||args.fit===true) {
         let bounds=viewer.getFitBounds();
         if(args.action==='zoom') {
@@ -243,7 +322,8 @@ export async function displayCommand(job) {
         viewer.getCamera().copyFrom(fitted);
       }
       view.updateCameraNearFar(); view.afterViewChange(); viewer.draw();
-      return {camera:cameraState(),microversion:micro(),applied:true};
+      return {camera:cameraState(),microversion:micro(),applied:true,
+        ...(args.action==='normal_to'?{facing_normal:facing(viewer.getCamera().getFrame(),args.plane.normal)}:{})};
     }
     if(operation==='capture') {
       const gl=viewer?.getGlContext();

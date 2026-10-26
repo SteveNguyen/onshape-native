@@ -238,8 +238,9 @@ transforms and mass. Organizing a tree should preserve the relevant geometry.
 
 The eight target/discovery/structure conveniences are exposed as **POST** `/local/TOOL_NAME`, with the
 same JSON argument object and decoded JSON result as MCP. They live outside
-Onshape's `/api/` namespace. Required header:
-`Authorization: Bearer <local token from .runtime/bridge.json>`.
+Onshape's `/api/` namespace. Each request needs a fresh signed header,
+`Authorization: ONH <ts>:<nonce>:<hmac>` (see the
+[security model](installation.md#security-model)); the token itself is never sent.
 Do not place the token in URLs, documentation, source control or tool output.
 
 Use the existing CLI so credentials are never printed:

@@ -43,6 +43,22 @@ def test_old_extension_missing_window_and_ambiguous_tabs_never_guess(mutate):
     assert resolve_context(context=c)["status"] == "needs_selection"
 
 
+def test_unauthorized_tab_needs_user_authorization_not_resolution():
+    c = context()
+    # The extension withholds URL and title of unauthorized tabs; only the did remains.
+    c["tabs"][2] = {"id": 13, "did": "a" * 24, "active": True, "window_id": 2, "authorized": False}
+    result = resolve_context(context=c)
+    assert result["status"] == "needs_authorization" and result["tab_id"] == 13 and result["did"] == "a" * 24 and "popup" in result["next"]
+    assert resolve_context(tab_id=13, context=c)["status"] == "needs_authorization"
+    c["tabs"][2]["active"] = False
+    candidates = resolve_context(context=c)["candidates"]
+    assert {"id": 13, "did": "a" * 24, "active": False, "window_id": 2, "authorized": False} in candidates
+    c["tabs"][2] = {**context()["tabs"][2], "authorized": True, "title": "Bracket"}
+    result = resolve_context(context=c)
+    assert result["status"] == "resolved"
+    assert resolve_context(context=c | {"tabs": c["tabs"][:2] + [{**c["tabs"][2], "active": False}]})["candidates"][2]["authorized"] is True
+
+
 def test_explicit_tab_and_url_must_agree():
     assert resolve_context(tab_id=11, context=context())["url"] == OTHER
     assert resolve_context(URL, 11, context())["status"] == "needs_selection"

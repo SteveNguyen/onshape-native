@@ -2,14 +2,32 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 import base64
+import secrets
 
 import httpx
 
-from .config import load_config, runtime_dir
+from .config import load_config, response_valid, runtime_dir, sign_request
 
 
 class OnshapeError(Exception):
     pass
+
+
+class BridgeAuth(httpx.Auth):
+    """Signs each final request (path, query and body bytes) instead of sending the token,
+    and accepts only responses the bridge signed for that request's nonce."""
+    requires_request_body = True
+    requires_response_body = True
+
+    def __init__(self, token):
+        self.token = token
+
+    def auth_flow(self, request):
+        nonce = secrets.token_hex(16)
+        request.headers["Authorization"] = sign_request(self.token, request.method, request.url.raw_path.decode("ascii"), request.content, nonce=nonce)
+        response = yield request
+        if not response_valid(self.token, nonce, response.content, response.headers.get("x-onh-mac")):
+            raise OnshapeError("Bridge response signature missing or invalid; another process may hold 127.0.0.1:8766, or the bridge token differs.")
 
 
 @dataclass
@@ -27,7 +45,7 @@ class Client:
         self.settings = settings or Settings.load()
         config = load_config()
         self.http = httpx.AsyncClient(base_url=f"http://127.0.0.1:{config['port']}",
-                                      headers={"Authorization": "Bearer " + config["token"]},
+                                      auth=BridgeAuth(config["token"]),
                                       timeout=110, follow_redirects=False, trust_env=False, transport=transport)
         self.calls = 0
         self.rate = {}

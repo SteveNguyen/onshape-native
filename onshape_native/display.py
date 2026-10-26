@@ -4,12 +4,14 @@ from __future__ import annotations
 import base64
 import io
 import math
+import re
 from typing import Literal
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .client import OnshapeError
+from .geometry import dot, face_plane_script, face_query, unit, view_basis
 from .structures import target_from_url
 
 
@@ -36,13 +38,57 @@ class VisibilityChange(BaseModel):
     visible: bool
 
 
+CAMERA_ACTIONS = {'read','save','restore','standard','orientation','fit','zoom','normal_to','section','section_off',
+                  'isolate','exit_isolate','make_transparent','exit_make_transparent'}
+PART_ID = re.compile(r'[A-Za-z0-9_+/=.:-]{1,128}')
+
+
+def valid_plane(plane):
+    """Viewer plane in meters with an orthonormal normal/x_dir (Python resolves faces and defaults first)."""
+    if not isinstance(plane,dict) or set(plane)!={'origin','normal','x_dir'}: raise ValueError('plane must be {origin, normal, x_dir}.')
+    for v in plane.values():
+        if not isinstance(v,list) or len(v)!=3 or any(type(x) not in (int,float) or not math.isfinite(x) for x in v): raise ValueError('Plane vectors must be three finite numbers.')
+    n,x=plane['normal'],plane['x_dir']
+    if abs(dot(n,n)-1)>1e-6 or abs(dot(x,x)-1)>1e-6 or abs(dot(n,x))>1e-6: raise ValueError('Plane normal and x_dir must be orthonormal.')
+
+
+async def element_center(service,url):
+    """Bounding-box centre (meters) of the URL's own element, so planes are never placed from another element's frame."""
+    path,configuration=service.target(url)
+    elements=await service.call('getElementsInDocument',{k:path[k] for k in ('did','wvm','wvmid')},{'elementId':path['eid']})
+    kind=next((e['elementType'] for e in elements if e.get('id')==path['eid']),None)
+    if kind not in ('ASSEMBLY','PARTSTUDIO'): raise OnshapeError('origin "center" needs an assembly or Part Studio element.')
+    b=await service.call('getAssemblyBoundingBoxes' if kind=='ASSEMBLY' else 'getPartStudioBoundingBoxes',path,{'configuration':configuration})
+    return [(b['low'+a]+b['high'+a])/2 for a in 'XYZ']
+
+
+async def resolve_plane(service,url,plane=None,face='',micro=''):
+    """{origin m, normal, x_dir} from an explicit plane or one Part Studio face/plane, evaluated at micro.
+    origin "center" means the element's own bounding-box centre."""
+    if bool(plane)==bool(face): raise OnshapeError('Give exactly one of plane or face: plane {origin (meters), normal, x_dir?}, or a Part Studio face Query/ID.')
+    if face:
+        data=service.snapshot_data((await service.inspect(url,geometry=False))['snapshot'])
+        if micro and data['microversion']!=micro: raise OnshapeError('Model revision differs from expected_microversion. Read fresh state.')
+        expression,queries=face_query(face)
+        result=(await service.eval(data,face_plane_script(expression),queries)).get('result')
+        if not isinstance(result,dict) or result.get('count')!=1: raise OnshapeError(f"face must resolve to exactly one face (got {(result or {}).get('count')}).")
+        plane={'origin':result['origin'],'normal':result['normal'],'x_dir':result['x']}
+    if not isinstance(plane,dict) or not {'origin','normal'}<=set(plane)<={'origin','normal','x_dir'}: raise OnshapeError('plane must be {origin, normal, x_dir?}.')
+    origin=await element_center(service,url) if plane['origin']=='center' else plane['origin']
+    if not isinstance(origin,list) or len(origin)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) for v in origin): raise OnshapeError('origin must be three finite numbers (meters) or "center".')
+    normal=unit(plane['normal'],'normal')
+    x=view_basis(normal)[0] if plane.get('x_dir') is None else unit(plane['x_dir'],'x_dir')
+    x=unit([a-dot(x,normal)*b for a,b in zip(x,normal)],'x_dir')  # orthogonal to the normal
+    return {'origin':[float(v) for v in origin],'normal':normal,'x_dir':x}
+
+
 def validate_display_job(job):
     """Same bounds for direct /command requests and MCP. No executable payloads."""
     op, args = job.get('operation'), job.get('args', {})
     if not isinstance(args, dict): raise ValueError('Display args must be an object.')
     fields = {
         'inspect': set(), 'visibility': {'changes','expected_state'},
-        'camera': {'action','view','frame','fit','occurrence_paths','camera_id','extents'},
+        'camera': {'action','view','frame','fit','occurrence_paths','camera_id','extents','plane','part_ids'},
         'capture': {'max_size'},
         'motion': {'action','mate','frames','start_degrees','end_degrees','session_id','frame','fps'},
     }
@@ -56,7 +102,15 @@ def validate_display_job(job):
         if not isinstance(args.get('expected_state'),list): raise ValueError('Use expected_state from a fresh display snapshot.')
     if op == 'camera':
         action=args.get('action')
-        if action not in {'read','save','restore','standard','orientation','fit','zoom'}: raise ValueError('Unknown camera action.')
+        if action not in CAMERA_ACTIONS: raise ValueError('Unknown camera action.')
+        if ('plane' in args) != (action in {'normal_to','section'}): raise ValueError('normal_to and section (only) take a plane.')
+        if 'plane' in args: valid_plane(args['plane'])
+        if action in {'isolate','make_transparent'}:
+            if ('occurrence_paths' in args) == ('part_ids' in args): raise ValueError('Give assembly occurrence_paths or Part Studio part_ids.')
+            if 'occurrence_paths' in args: action='zoom'  # same occurrence path checks below
+            elif not isinstance(args['part_ids'],list) or not 1<=len(args['part_ids'])<=100 or len(set(args['part_ids']))!=len(args['part_ids']) \
+                    or any(not isinstance(p,str) or not PART_ID.fullmatch(p) for p in args['part_ids']): raise ValueError('Provide 1–100 distinct part IDs.')
+        elif 'part_ids' in args: raise ValueError('part_ids apply to isolate/make_transparent.')
         if action=='restore' and (not isinstance(args.get('camera_id'),str) or not 1<=len(args['camera_id'])<=128): raise ValueError('Use camera_id returned by save.')
         if 'fit' in args and type(args['fit']) is not bool: raise ValueError('fit must be boolean.')
         if 'extents' in args:
@@ -106,7 +160,7 @@ class Display:
         native={'did':target['did'],'wid':target['wvmid'],'eid':target['eid']}
         status=await self.s.client.status()
         if 'display_v1' not in (status.get('extension') or {}).get('capabilities',[]):
-            raise OnshapeError('Connected extension lacks display_v1. Update/reload Onshape Native 0.4.0 and restart the MCP/companion; bridge_status reports the loaded version and capabilities.')
+            raise OnshapeError('Connected extension lacks display_v1. Update/reload Onshape Native 0.5.0 and restart the MCP/companion; bridge_status reports the loaded version and capabilities.')
         if tab_id is None:
             opened=await self.s.client.command({'kind':'open','target':native})
             tab_id=opened['tab_id']

@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-26",
+  "research_document": "redacted: public free-plan test Part Studio (one lofted solid, rectangle 64.6 x 80.2 mm to circle 45.97 mm, 25 mm tall)",
+  "privacy": "public test data; explicitly authorized by the user",
+  "frontend_assets": ["woolsthorpe.425850a465996ab70100.js", "webgl.f8aa9577dc1ef1bd6c40.js"],
+  "server_side": {
+    "topology_solid_faces_only": {"faces": 6, "previously_included_datum_and_sketch_faces": 6},
+    "evaluate_section_mm2": {"z_0.5": 5094.14, "z_12.5": 3200.22, "z_24.5": 1712.98, "front_plane": 1381.17,
+                             "checks": "bracketed by base 5181.87 and top 1659.84 faces; front-plane trapezoid hand estimate 1382"},
+    "render_views": "named front equals direction (0,-1,0) apart from centring; direction (1,1,0) and face-normal view rendered as expected",
+    "bug_found_live": "FeatureScript reserves `box`; section and face-plane scripts failed to parse until renamed (regression test added)"
+  },
+  "live_editor": [
+    {"action": "save", "result": "camera_id returned"},
+    {"action": "normal_to Front plane", "result": "applied, facing_normal true, view cube Front"},
+    {"action": "section z=12.5 mm normal +Z", "result": "verified; lower half removed, + normal side kept"},
+    {"action": "section_off", "result": "verified; capture byte-identical to the pre-section capture"},
+    {"action": "isolate part", "result": "verified; other entities faded"},
+    {"action": "exit_isolate", "result": "verified"},
+    {"action": "make_transparent part", "result": "verified; part translucent"},
+    {"action": "exit_make_transparent", "result": "verified"},
+    {"action": "restore camera", "result": "applied; original oblique view back"}
+  ],
+  "assembly": {
+    "built_via_rest": "two instances of the test part inserted with addInstance, second moved +100 mm X with occurrencetransforms",
+    "render_views": "isometric, direction (1,-1,1) and (0,0,1) rendered both instances as expected",
+    "element_tree": "complete, no issues",
+    "live_editor": [
+      {"action": "standard isometric", "result": "applied"},
+      {"action": "section x=0 normal +X", "result": "verified; instance 1 cut in half, + side kept, cut face capped; instance 2 untouched"},
+      {"action": "section_off", "result": "verified; a second section_off reports nothing to restore"},
+      {"action": "normal_to plane normal -Y", "result": "applied, facing_normal true, view cube Front"},
+      {"action": "isolate occurrence 1", "result": "verified; instance 2 faded"},
+      {"action": "make_transparent occurrence 2", "result": "verified; instance 2 translucent"},
+      {"action": "exits and camera restore", "result": "verified/applied"}
+    ]
+  },
+  "mate_via_rest": {
+    "steps": "two face-centroid BTMMateConnector-66 (top face of instance 1, base of instance 2) + BTMMate-64 REVOLUTE; instance 1 fixed with ui.assembly.GBTUiChangeOccurrenceFixedStatus",
+    "lessons": ["the mate's flip is primaryAxisAlignment; flipPrimary belongs to mate connectors (from assembly featurespecs)",
+                "without a fixed occurrence the solver moved the first instance; absolute occurrencetransforms on it were overridden",
+                "a relative transform of the whole rigid stack with the mate suppressed, then fix + unsuppress, gave the intended pose"],
+    "result": "instance 1 fixed upright at origin, instance 2 upright at z=25 mm"
+  },
+  "mate_animation": {"prepare": "0-180 deg, 7 frames", "step_frame_3_solver_angle_deg": 90.00000250447816, "pose_verified": true,
+                     "restore": "done; preview only"},
+  "part_edit_hole": {
+    "features": "sketch circle r=5 mm on the top face (deterministic id) + extrude REMOVE THROUGH_ALL, both via feature(add) with rejectMicroversionSkew",
+    "volume_removed_mm3": 1963.5, "expected_pi_r2_h": 1963.5,
+    "section_z12.5_mm2": {"before": 3200.2, "after": 3121.7, "expected_loss": 78.5},
+    "regeneration_errors": [], "render": "hole visible from top and bottom"
+  },
+  "not_validated": ["popup name display"],
+  "model_changed": false
+}

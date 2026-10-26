@@ -12,8 +12,9 @@ export async function pageCommand(job) {
   if (target && new URLSearchParams(location.search).get("configuration")) throw new Error("Native editor commands require an unconfigured workspace tab. Use REST for configurations.");
 
   if (job.kind === "rest") {
-    const decoded = decodeURIComponent(decodeURIComponent(job.path));
-    if (!/^\/api\/(?:v\d+\/)?[a-zA-Z]/.test(job.path) || /\.\.|[\\?#\x00]/.test(decoded)) throw new Error("Invalid API path.");
+    // Same canonical-path rule as policy.js: decode once; refuse double encoding, matrix params and control chars.
+    let decoded = null; try { decoded = decodeURIComponent(job.path); } catch {}
+    if (!/^\/api\/(?:v\d+\/)?[a-zA-Z]/.test(job.path) || decoded === null || /%25/i.test(job.path) || /\.\.|[;\\?#\x00-\x1f]/.test(decoded)) throw new Error("Invalid API path.");
     if (/\/(clientinfo|oauth|apikeys)(\/|$)/i.test(decoded) || (/\/users\/session\/?$/.test(decoded) && job.method !== "GET")) throw new Error("Authentication endpoint refused. Sign in through Onshape.");
     const url = new URL(job.path, location.origin);
     for (const [key, value] of Object.entries(job.query || {})) {
@@ -67,8 +68,8 @@ export async function pageCommand(job) {
   if (chunks.at(-1)?.[0]?.[0] === marker) chunks.pop();
   if (typeof require !== "function") throw new Error("Onshape webpack runtime is not initialized; wait for the editor.");
   const profiles = [
-    {classes:96402, controller:87539, registry:49857, sidebar:65443},
-    {classes:27940, controller:3392, registry:45867, sidebar:64725}
+    {classes:96402, controller:87539, registry:49857, sidebar:65443, webgl:41413},
+    {classes:27940, controller:3392, registry:45867, sidebar:64725, webgl:null}
   ];
   let profile, classes, controllerType;
   const failures = [];
@@ -176,6 +177,11 @@ export async function pageCommand(job) {
     const el = saved.nodes[job.control];
     if (!el?.isConnected || !el.getClientRects().length || el.disabled) throw new Error("Control unavailable.");
     if (el.matches('input[type="password"],input[type="file"]')) throw new Error("Use API upload or the browser for this control.");
+    // Heuristic label guard: the worker cannot see controls, so admin-looking ones
+    // need the per-document admin opt-in the worker sets from policy.
+    const label = el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder") || el.textContent || "";
+    if (job.admin_allowed !== true && /\b(share|public|permissions?|invite|transfer|owner(ship)?|webhooks?|delete document)\b/i.test(label))
+      throw new Error("Control looks like an admin action (sharing, permissions, ownership, webhooks, deletion). Ask the user to enable \"Allow admin actions\" for this document in the extension popup.");
     delete globalThis.__onshapeNativeUI;
     el.focus();
     if (job.action === "click") el.click();
@@ -204,7 +210,10 @@ export async function pageCommand(job) {
     "ui.sketch.GBTUiSketchFinishInferencing", "ui.sketch.GBTUiSketchChangeInferencingMode",
     "ui.sketch.GBTUiSketchAddRectangleCall", "ui.sketch.GBTUiSketchAddCircleCall",
     "ui.sketch.GBTUiSketchGetProjectionCall", "ui.sketch.GBTUiSketchAddDimensionCall",
-    "ui.sketch.GBTUiSketchModifyDimensionCall"
+    "ui.sketch.GBTUiSketchModifyDimensionCall",
+    // Replay-verified in native_catalog.VERIFIED.
+    "ui.assembly.GBTUiAssemblyInsertOccurrence", "ui.GBTUiBatchPartPropertyChange", "ui.assembly.GBTUiChangeOccurrenceFixedStatus",
+    "ui.GBTUiSpecifyFeature", "ui.document.GBTUiEditElementGroups", "partstudiofolders.GBTUiDeleteFolder", "ui.GBTUiReorderFeatures"
   ]);
   const reads = new Set(["ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiMeasureCall",
     "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchGetProjectionCall",
@@ -215,6 +224,8 @@ export async function pageCommand(job) {
   if (!allowed.has(job.command) && (!job.command.includes("GBTUi") || !constructors.has(job.command) || /Response|Notification|DisplayData|ComputedData/.test(job.command))) {
     throw new Error("Native command is absent from the runtime schema.");
   }
+  if (!allowed.has(job.command) && !reads.has(job.command) && job.allow_untested_native !== true)
+    throw new Error("Untested native command refused. Ask the user to enable \"Advanced: allow untested native commands\" in the extension popup.");
   if (!reads.has(job.command) && (!job.expected_microversion || getMicroversion() !== job.expected_microversion)) {
     throw new Error("Native revision changed or unavailable. Read native_state before editing.");
   }

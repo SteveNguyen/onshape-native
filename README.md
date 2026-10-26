@@ -14,11 +14,13 @@ uv run --python 3.12 https://raw.githubusercontent.com/godbrigero/onshape-native
 
 Replace `codex` with `claude`, `both`, or `generic`. Add `--directory "PATH"` to choose where the source and extension live. For a local checkout, run `uv run --python 3.12 install.py --client codex` instead.
 
+The `main` URL runs whatever is on that branch when you run it; for a reviewed install, replace `main` with a verified tag or commit SHA and add `--ref <same SHA>` ([details](docs/installation.md#one-setup-command)).
+
 The installer downloads the server, creates its Python environment, generates private pairing data on your device, and registers the selected client. `generic` generates a `.mcp.json` entry to import into your client's MCP settings.
 
 **Finish in your browser:** open its extensions page, enable Developer mode, choose **Load unpacked**, and select the extension folder printed by the installer. Sign in to Onshape, then restart your AI client. Browser approval cannot be automated by this installer.
 
-The AI client, server and Chromium browser must run on the same computer. The installer handles macOS, Linux and Windows paths; full browser setup has been tested on macOS only. See [installation and updates](docs/installation.md).
+The AI client, server and Chromium browser must run on the same computer. The installer handles macOS, Linux and Windows paths; full browser setup has been tested on macOS only. See [installation and updates](docs/installation.md) and the [security model](docs/installation.md#security-model): the agent can only touch documents you authorize in the extension popup.
 
 ## What it does
 

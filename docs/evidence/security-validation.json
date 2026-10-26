@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-26",
+  "research_documents": "redacted: three throwaway documents (A authorized, B unauthorized, C created then deleted) on a free account",
+  "privacy": "public free-plan test data; explicitly authorized by the user",
+  "extension_version": "0.5.0",
+  "bridge_protocol": 2,
+  "driver": "standalone scripts/bridge.py + signed scripts/request.py and onshape_native.Client/server functions",
+  "results": [
+    {"test": "handshake", "result": "pass", "observed": "extension connected with policy_v1; signed /health response verified"},
+    {"test": "default deny", "result": "pass", "observed": "tabs listed without title/url; REST and native reads of an unauthorized document refused"},
+    {"test": "authorize via popup", "result": "pass", "observed": "title/url exposed, REST features and native state readable"},
+    {"test": "write", "result": "pass", "observed": "feature renamed via REST updatePartStudioFeature; full feature body passed the id scanner"},
+    {"test": "cross-document", "result": "pass", "observed": "9 routes to the unauthorized document refused: plain, /d/, uppercase, %2F, linkDocumentId query, native body documentId, open, state, unscoped document list"},
+    {"test": "admin read (acl)", "result": "pass", "observed": "refused without admin, allowed with admin, refused again after the user unticked it"},
+    {"test": "create document", "result": "blocked by plan", "observed": "free plan requires isPublic:true, which is admin with no document; refused by design"},
+    {"test": "copy workspace auto-authorize", "result": "pass", "observed": "public copy with admin on the source; new document authorized without admin"},
+    {"test": "delete document", "result": "pass", "observed": "refused without admin on the new document, deleted after the user enabled it"},
+    {"test": "ui fallback gate", "result": "pass", "observed": "ui_inspect refused with the toggle off"},
+    {"test": "untested native gate", "result": "pass", "observed": "ui.GBTUiGetSurfaceDeviationCall refused with the toggle off"},
+    {"test": "export STEP", "result": "pass after fix", "observed": "externaldata file id was misread as a document id; fixed (NOT_DID_AFTER externaldata) and downloaded 22963 bytes without a storage redirect"},
+    {"test": "export STL", "result": "open", "observed": "synchronous /stl redirects to regional cad-euw1.onshape.com, which returns 401 to the cookie-less bridge fetch; pre-existing; use a translation instead"},
+    {"test": "upload restriction", "result": "pass", "observed": "/etc/hosts and ../bridge.json refused; STEP from runtime/uploads imported as a new element"},
+    {"test": "port squatter", "result": "pass", "observed": "fake bridge on 8766 never received the token; running_bridge, Client.status and Client.command rejected unsigned replies; extension closed on a forged ready without running a command; request contents remain visible to a squatter (documented)"}
+  ],
+  "s3_export_host_observed": null
+}

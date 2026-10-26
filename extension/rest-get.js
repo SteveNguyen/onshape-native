@@ -2,8 +2,9 @@
 // Host permission is restricted to cad.onshape.com; never export cookies.
 export async function restGet(job) {
   const url = new URL(job.path, 'https://cad.onshape.com');
-  const decoded = decodeURIComponent(decodeURIComponent(job.path));
-  if (url.origin !== 'https://cad.onshape.com' || !/^\/api\/(?:v\d+\/)?[a-zA-Z]/.test(job.path) || /\.\.|[\\?#\x00]/.test(decoded) || /\/(clientinfo|oauth|apikeys)(\/|$)/i.test(decoded)) throw new Error('Invalid API path.');
+  // Same canonical-path rule as policy.js: decode once; refuse double encoding, matrix params and control chars.
+  let decoded = null; try { decoded = decodeURIComponent(job.path); } catch {}
+  if (url.origin !== 'https://cad.onshape.com' || !/^\/api\/(?:v\d+\/)?[a-zA-Z]/.test(job.path) || decoded === null || /%25/i.test(job.path) || /\.\.|[;\\?#\x00-\x1f]/.test(decoded) || /\/(clientinfo|oauth|apikeys)(\/|$)/i.test(decoded)) throw new Error('Invalid API path.');
   for (const [key,value] of Object.entries(job.query || {})) {
     if (value == null) continue;
     for (const v of Array.isArray(value) ? value : [value]) url.searchParams.append(key,String(v));

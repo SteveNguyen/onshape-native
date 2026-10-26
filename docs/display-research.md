@@ -62,6 +62,63 @@ live tests. Capture calls `viewer.draw()` and reads `getGlContext().canvas` in
 the same JavaScript task, before WebGL drawing-buffer discard. This preserves
 current markers and view-cube geometry without browser screenshot permissions.
 
+## Normal-to, section and isolate (2026-10-26)
+
+Traced with `grep` in the shipped assets (read as data, never executed):
+`woolsthorpe.425850a465996ab70100.js` and `webgl.f8aa9577dc1ef1bd6c40.js`
+(the build listed by `/signin` on 2026-10-26, same woolsthorpe as the
+2026-10-20 repair). Not yet validated live.
+
+**Normal to.** The `VIEW_NORMAL_TO` handler `alignViewNormalToSelection` calls
+`getPrimaryViewController().animateViewNormalToPlaneMatrix(planeMatrix, bounds, !0, canvasPoint)`
+(woolsthorpe). In webgl, that method computes
+`camera.getCameraRotatedToViewAndTranslated(e, t.center(), canvasCenter, i)` (or
+`getCameraRotatedToView`) and only then `animateToCustomView`. The adapter calls the
+same camera method with the plane origin and `camera.viewportToCanvas([w/2,h/2,0])`,
+then `camera.copyFrom(result)` (no animation, deterministic). Plane-matrix format,
+from section planes' `getPlaneMatrix`: 16 numbers, column-major,
+`[tangent,0, normal×tangent,0, normal,0, center,1]` in meters.
+`getClosestNormalView(e,{flipNormalIfIdentical})` reads only columns 0–1 and keeps
+the in-plane orientation closest to the current camera, so the view can come from
+behind the plane. When the camera back axis does not follow the normal, the adapter
+repeats the call with `flipNormalIfIdentical:true`, Onshape's own second Normal-to.
+
+**Section view.** woolsthorpe re-exports webgl module **41413** under readable
+names (`Ee=n(41413)`; `getActiveSectionViewState:function(){return Ee.aL7}`,
+`getSerializablePlaneData:…Ee.ejz`, `setFromSerializablePlaneData:…Ee.Q0t`).
+41413 forwards them to the section module 80988 (`aL`→`q()` returns the singleton
+section state; `ej`→`Be()` maps `getSerializedSectionPlanes()` to messages with
+`center/normal/tangent {x,y,z}`; `Q0`→`ze(planes, elementConnection, viewer)`
+updates planes in place, or removes all and adds `new SectionPlane(normal, tangent,
+center, conn, viewer)` per entry). Onshape's follow mode applies them the same way:
+`(0,a.wkm)(e.sectionViewData,t,this.viewer),(0,a.Q0t)(e.sectionPlanes,t,this.viewer)`.
+The adapter requires `profile.webgl` (41413) exports `aL7/ejz/Q0t`, else fails with
+`section-helpers-missing:<id>`; the 2026-10-07 profile has none. It refuses unless
+`viewer.supportsGraphicalSectionPlanes()`, saves `ejz()` once per tab before the
+first section, and `section_off` passes the saved list back to `Q0t` (an empty list
+removes all planes). Exclusion/inclusion lists (`wwM/wkm`) are not touched.
+Side convention, inferred: `setSectionPlaneOnMatrix` orients the normal along the
+camera direction (`T.Om(u.direction,o)<0&&negate(o)`), i.e. away from the viewer,
+so material on the + normal side is kept. Confirm with a live capture.
+
+**Isolate / make transparent.** Context menus trigger `ISOLATE_PARTS(parts, viewer)`,
+`MAKE_TRANSPARENT_PARTS`, `ISOLATE_COMPONENTS(item, !0, null, viewer)`,
+`MAKE_TRANSPARENT_COMPONENTS`, `EXIT_ISOLATE`, `EXIT_MAKE_TRANSPARENT`. The webgl
+listeners (class `IsolatedOccurrencesManager`, `viewer.getIsolatedOccurrenceManager()`)
+are what the adapter calls directly, so no event-bus module is needed:
+
+- Part Studio isolate: `currentIsolateManager.affectParts(parts, viewer)`
+  (`listenTo(…,P.ISOLATE_PARTS,this.affectParts)`; `affectParts(e,t,i){return this.affectPartIds(e.map((e=>e.id)),…)}`).
+- Part Studio transparent: `onMakeTransparentParts(parts, viewer)`
+  (`new WM(t,this,e,t),this.currentMakeTransparentManager.affectParts(e,t)`).
+- Assembly: `affectId(occurrence)` per occurrence, as `isolateSelections` /
+  `makeTransparentSelections` do (`e.forEach((e=>t.affectId(e.getOccurrence())))`);
+  transparent first creates its manager with `onMakeTransparentComponents(null,!1,null,viewer)`.
+- Exits: `clearIsolateNoAnimation()` / `clearTransparentNoAnimation()` (used by
+  `clearAllIsolateNoAnimation`), then `removeMakeTransparentManager()` if one remains.
+- Readback: `isInIsolateMode()`, `isInMakeTransparentMode()`,
+  `getAffectedPartIdsOrOccurrences()` (occurrence-path Map or part-id Set).
+
 ## Live validation scope
 
 The open drone assembly contained 172 sidebar rows, 30 inherited connectors,

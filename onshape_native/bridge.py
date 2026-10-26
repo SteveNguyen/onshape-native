@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 import json
 import re
 import secrets
 import socket
+import time
 import base64
 from urllib.parse import unquote, urlsplit, parse_qs
 
@@ -18,10 +20,21 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
-from .config import load_config
+from .config import load_config, mac, request_message, response_mac, response_valid, sign_request
 from .native_catalog import is_allowed, READS
 
 MAX_BODY = 96 * 1024 * 1024
+PROTOCOL = 2
+REPLAY_WINDOW = 60  # seconds of clock skew accepted on signed requests
+MAX_NONCES = 10_000  # unexpired nonces remembered; bounds replay-cache memory
+NONCE = re.compile(r"[0-9a-f]{32}")
+MAC = re.compile(r"[0-9a-f]{64}")
+# Onshape's export bucket hostname has not been captured live yet (tests only use
+# sample.s3.amazonaws.com); pin it once observed. Virtual-hosted, path-style and regional S3.
+S3_HOST = re.compile(r"(?:[a-z0-9.-]+\.)?s3([.-][a-z0-9-]+)?\.amazonaws\.com")
+# Same canonical-path rule as extension/policy.js: decode once and refuse anything
+# a server or fetch() could read differently (double encoding, matrix params, control chars).
+NON_CANONICAL = re.compile(r"[;\\?#\x00-\x1f]|\.\.")
 
 
 class BridgeError(Exception):
@@ -38,9 +51,12 @@ def validate_job(job):
         path = job.get("path", "")
         if not isinstance(path, str):
             raise BridgeError("API path must be a string.")
-        decoded = unquote(unquote(path))
-        if not re.match(r"^/api/(?:v\d+/)?[a-zA-Z]", path) or any(c in decoded for c in ("..", "\\", "?", "#", "\x00")):
-            raise BridgeError("Expected an Onshape /api/ path, without query or traversal.")
+        try:  # malformed escapes and invalid UTF-8 are refused, as decodeURIComponent does
+            decoded = None if re.search(r"%25|%(?![0-9a-f]{2})", path, re.I) else unquote(path, errors="strict")
+        except UnicodeDecodeError:
+            decoded = None
+        if not re.match(r"^/api/(?:v\d+/)?[a-zA-Z]", path) or decoded is None or NON_CANONICAL.search(decoded):
+            raise BridgeError("Expected a canonical Onshape /api/ path, without query, traversal, ';', '\\', control characters or double encoding.")
         if job.get("method") not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             raise BridgeError("Unsupported HTTP method.")
         if re.search(r"/(?:clientinfo|oauth|apikeys)(?:/|$)", decoded, re.I) or (re.search(r"/users/session/?$", decoded) and job["method"] != "GET"):
@@ -107,8 +123,12 @@ class Broker:
             ws = self.extension
             if ws is None:
                 raise BridgeError("Extension disconnected. Connect Onshape Native in Comet.")
-            if job.get("kind") == "display" and "display_v1" not in (self.extension_info or {}).get("capabilities", []):
-                raise BridgeError("Loaded extension lacks display_v1. Update/reload version 0.4.0; check bridge_status.")
+            capabilities = (self.extension_info or {}).get("capabilities", [])
+            # Document scoping lives in the extension; an older one cannot enforce it.
+            if job.get("kind") != "tabs" and "policy_v1" not in capabilities:
+                raise BridgeError("Loaded extension lacks policy_v1 document scoping. Reload the Onshape Native extension (version 0.5.0); check bridge_status.")
+            if job.get("kind") == "display" and "display_v1" not in capabilities:
+                raise BridgeError("Loaded extension lacks display_v1. Update/reload version 0.5.0; check bridge_status.")
             command_id = secrets.token_hex(16)
             future = asyncio.get_running_loop().create_future()
             self.pending[command_id] = future
@@ -128,15 +148,20 @@ class Broker:
                 raise BridgeError("Invalid download redirect.")
             if url.hostname == "cad.onshape.com":
                 return await self.dispatch({**job, "path": url.path, "query": parse_qs(url.query)}, timeout, redirects + 1)
-            if not url.hostname or not (url.hostname.endswith(".amazonaws.com") or url.hostname.endswith(".onshape.com")):
+            if not url.hostname or not (S3_HOST.fullmatch(url.hostname) or url.hostname.endswith(".onshape.com")):
                 raise BridgeError("Unrecognized export host; inspect the download workflow before extending the allowlist.")
             # Signed export URL from Onshape. This client has NO session cookies,
             # bridge token or API keys, and never forwards them to file storage.
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=45) as client:
                 try:
                     async with client.stream("GET", result["download_redirect"], headers=job.get("request_headers", {})) as response:
+                        if response.status_code in (401, 403) and re.fullmatch(r"cad-[a-z0-9-]+\.onshape\.com", url.hostname):
+                            # Regional hosts want session cookies, which this client never sends.
+                            raise BridgeError(f"Export host {url.hostname} returned HTTP {response.status_code}: it needs browser cookies, which are never forwarded. "
+                                              "Export via a translation instead (create*Translation with formatName, storeInDocument=false; poll getTranslation; download resultExternalDataIds with downloadExternalData).")
                         if not 200 <= response.status_code < 300:
-                            raise BridgeError(f"Export storage returned HTTP {response.status_code}.")
+                            # Host only: the query carries the storage signature.
+                            raise BridgeError(f"Export storage {url.hostname} returned HTTP {response.status_code}.")
                         raw = bytearray()
                         async for chunk in response.aiter_bytes():
                             raw.extend(chunk)
@@ -156,9 +181,17 @@ class Broker:
             return
         await ws.accept()
         try:
+            # Mutual HMAC challenge: neither side sends the token, so a squatter on
+            # the port learns nothing, and the extension accepts commands only
+            # after the bridge proves it holds the token ("srv" mac).
+            server_nonce = secrets.token_hex(16)
+            await ws.send_json({"type": "challenge", "nonce": server_nonce})
             hello = await asyncio.wait_for(ws.receive_json(), 5)
-            supplied = hello.get("token", "") if isinstance(hello, dict) else ""
-            if not isinstance(supplied, str) or not secrets.compare_digest(supplied.encode(), self.config["token"].encode()) or self.extension:
+            ext_nonce = hello.get("nonce") if isinstance(hello, dict) else None
+            supplied = hello.get("mac") if isinstance(hello, dict) else None
+            # Shape check first: compare_digest raises TypeError on non-ASCII str.
+            if (not isinstance(ext_nonce, str) or not NONCE.fullmatch(ext_nonce) or not isinstance(supplied, str) or not MAC.fullmatch(supplied)
+                    or not hmac.compare_digest(supplied, mac(self.config["token"], f"ext\n{server_nonce}\n{ext_nonce}")) or self.extension):
                 await ws.close(code=1008)
                 return
             self.extension = ws
@@ -166,7 +199,8 @@ class Broker:
             capabilities = hello.get("capabilities", [])
             self.extension_info = {"version": version if isinstance(version, str) and len(version) < 50 else "unknown",
                                    "capabilities": [c for c in capabilities if isinstance(c, str) and len(c)<80][:30] if isinstance(capabilities, list) else []}
-            await ws.send_json({"type": "ready", "protocol": 1})
+            async with self.send_lock:
+                await ws.send_json({"type": "ready", "protocol": PROTOCOL, "mac": mac(self.config["token"], f"srv\n{ext_nonce}\n{server_nonce}")})
             while True:
                 raw = await ws.receive_text()
                 if len(raw.encode()) > MAX_BODY:
@@ -197,43 +231,64 @@ def create_app(config=None):
     config = config or load_config()
     broker = Broker(config)
 
-    async def auth(request):
+    seen = {}  # nonce -> signed ts, kept until the ts check alone refuses a replay
+
+    async def authorized_body(request):
+        """Raw body of a correctly signed, fresh, unreplayed request; else a refusal response."""
         expected_host = f"127.0.0.1:{config['port']}"
         if request.headers.get("host") != expected_host or request.headers.get("origin"):
             return JSONResponse({"error": "Origin or host refused."}, 403)
-        value = request.headers.get("authorization", "")
-        if not secrets.compare_digest(value.encode(), ("Bearer " + config["token"]).encode()):
-            return JSONResponse({"error": "Unauthorized."}, 401)
-
-    async def read_body(request):
-        chunks = bytearray()
+        unauthorized = JSONResponse({"error": "Unauthorized."}, 401)
+        parts = re.fullmatch(r"ONH (\d{1,12}):([0-9a-f]{32}):([0-9a-f]{64})", request.headers.get("authorization", ""))
+        now = time.time()
+        if not parts or abs(now - int(parts[1])) > REPLAY_WINDOW:
+            return unauthorized
+        body = bytearray()
         async for chunk in request.stream():
-            chunks.extend(chunk)
-            if len(chunks) > MAX_BODY:
-                raise BridgeError("Request exceeds 96 MiB.")
-        return json.loads(chunks) if chunks else {}
+            body.extend(chunk)
+            if len(body) > MAX_BODY:
+                return JSONResponse({"error": "Request exceeds 96 MiB."}, 413)
+        # Sign exactly what arrived: encoded path (ids may contain %2F) plus raw query.
+        path = request.scope.get("raw_path", request.url.path.encode()).decode("ascii")
+        if request.scope.get("query_string"):
+            path += "?" + request.scope["query_string"].decode("ascii")
+        ts, nonce, supplied = parts.groups()
+        if not hmac.compare_digest(supplied, mac(config["token"], request_message(request.method, path, ts, nonce, bytes(body)))):
+            return unauthorized
+        for old in [n for n, t in seen.items() if t < now - REPLAY_WINDOW]:
+            del seen[old]
+        if nonce in seen:
+            return unauthorized
+        if len(seen) >= MAX_NONCES:
+            return JSONResponse({"error": "Too many signed requests; retry shortly."}, 429)
+        seen[nonce] = int(ts)
+        return bytes(body), nonce
 
-    async def health(request):
-        denied = await auth(request)
-        if denied is not None:
-            return denied
-        return JSONResponse({"protocol": 1, "extension_connected": broker.extension is not None,
+    def authenticated(handler):
+        """handler(request, body) for signed requests only. Its response is signed for the
+        request nonce, so a port squatter cannot pose as the bridge to the MCP client."""
+        async def endpoint(request):
+            auth = await authorized_body(request)
+            if isinstance(auth, Response):
+                return auth
+            body, nonce = auth
+            response = await handler(request, body)
+            response.headers["X-ONH-MAC"] = response_mac(config["token"], nonce, response.body)
+            return response
+        return endpoint
+
+    async def health(request, body):
+        return JSONResponse({"protocol": PROTOCOL, "extension_connected": broker.extension is not None,
                              "extension": broker.extension_info, "pending": len(broker.pending)})
 
-    async def command(request):
-        denied = await auth(request)
-        if denied is not None:
-            return denied
+    async def command(request, body):
         try:
-            data = await read_body(request)
+            data = json.loads(body) if body else {}
             return JSONResponse(await broker.dispatch(data))
         except (BridgeError, ValueError) as error:
             return JSONResponse({"error": str(error)}, 400)
 
-    async def local_tool(request):
-        denied = await auth(request)
-        if denied is not None:
-            return denied
+    async def local_tool(request, raw):
         # These Python conveniences deliberately live outside Onshape's /api/
         # namespace. They use the same companion/extension transport as MCP.
         from . import server
@@ -246,7 +301,7 @@ def create_app(config=None):
         if name not in names:
             return JSONResponse({"error": "Unknown local tool.", "tools": sorted(names)}, 404)
         try:
-            body = await read_body(request)
+            body = json.loads(raw) if raw else {}
             if not isinstance(body, dict): raise ValueError("Tool arguments must be a JSON object.")
             function = getattr(server, name)
             inspect.signature(function).bind(**body)
@@ -261,10 +316,7 @@ def create_app(config=None):
         except (OnshapeError, BridgeError, ValueError, TypeError) as error:
             return JSONResponse({"error": str(error), "next": "Inspect current state before retrying a mutation."}, 400)
 
-    async def rest(request):
-        denied = await auth(request)
-        if denied is not None:
-            return denied
+    async def rest(request, raw):
         try:
             query = {}
             for key, value in request.query_params.multi_items():
@@ -281,16 +333,13 @@ def create_app(config=None):
             if "accept" in request.headers and request.headers["accept"] != "*/*": job["accept"] = request.headers["accept"]
             content_type = request.headers.get("content-type", "application/json")
             if request.method != "GET":
-                if "json" in content_type:
-                    job["body"] = await read_body(request)
+                if "json" in content_type.lower():
+                    job["body"] = json.loads(raw) if raw else {}
                     if job["body"] is None:
                         job["body_present"] = True
                 else:
-                    raw = bytearray()
-                    async for chunk in request.stream():
-                        raw.extend(chunk)
-                        if len(raw) > 64 * 1024 * 1024:
-                            raise BridgeError("Upload exceeds 64 MiB.")
+                    if len(raw) > 64 * 1024 * 1024:
+                        raise BridgeError("Upload exceeds 64 MiB.")
                     job.update({"body_base64": base64.b64encode(raw).decode(), "content_type": content_type})
             result = await broker.dispatch(job)
             if not isinstance(result, dict):
@@ -308,10 +357,10 @@ def create_app(config=None):
         except (BridgeError, ValueError) as error:
             return JSONResponse({"error": str(error)}, 400)
 
-    app = Starlette(routes=[Route("/health", health), Route("/command", command, methods=["POST"]),
-                           Route("/local/{tool}", local_tool, methods=["POST"]),
+    app = Starlette(routes=[Route("/health", authenticated(health)), Route("/command", authenticated(command), methods=["POST"]),
+                           Route("/local/{tool}", authenticated(local_tool), methods=["POST"]),
                            WebSocketRoute("/extension", broker.websocket),
-                           Route("/api/{path:path}", rest, methods=["GET", "POST", "PUT", "PATCH", "DELETE"])])
+                           Route("/api/{path:path}", authenticated(rest), methods=["GET", "POST", "PUT", "PATCH", "DELETE"])])
     app.state.broker = broker
     return app
 
@@ -320,14 +369,17 @@ def create_app(config=None):
 async def running_bridge():
     """Reuse an authenticated bridge or own one for this MCP process lifetime."""
     config = load_config()
+    nonce = secrets.token_hex(16)
     async with httpx.AsyncClient(trust_env=False) as client:
         try:
             response = await client.get(f"http://127.0.0.1:{config['port']}/health",
-                                        headers={"Authorization": "Bearer " + config["token"]}, timeout=1)
+                                        headers={"Authorization": sign_request(config["token"], "GET", "/health", nonce=nonce)}, timeout=1)
         except httpx.HTTPError:
             response = None
     if response is not None:
-        if response.status_code != 200 or response.json().get("protocol") != 1:
+        # Only a bridge holding the token can sign the reply for this nonce.
+        if (response.status_code != 200 or not response_valid(config["token"], nonce, response.content, response.headers.get("x-onh-mac"))
+                or response.json().get("protocol") != PROTOCOL):
             raise BridgeError("Port is occupied by another service or a bridge with another token.")
         yield
         return

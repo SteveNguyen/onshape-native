@@ -3,9 +3,12 @@ import {restGet} from "./rest-get.js";
 import {tabContext} from "./tab-context.js";
 import {displayCommand} from "./display-adapter.js";
 import {BRIDGE_TOKEN} from "./local-config.js";
+import {applyPolicy, effectivePolicy, recordCreated} from "./policy.js";
+import {bridgeSession} from "./handshake.js";
 
 let socket = null;
 let heartbeat = null;
+let verified = null;  // the socket whose bridge proved the token
 let inFlight = false;
 const BASE = "ws://127.0.0.1:8766/extension";
 
@@ -27,7 +30,25 @@ async function resolveTab(job) {
   return selected;
 }
 
+async function stored() { return chrome.storage.local.get(["policy", "created"]); }
+
 async function execute(job) {
+  // The popup-managed policy is authoritative; bridge-supplied trust fields are overwritten.
+  const {policy, created} = await stored();
+  const current = effectivePolicy(policy, created);
+  job = applyPolicy(job, current);
+  const result = await run(job, current);
+  if (job.kind === "rest" && job.method !== "GET") {
+    // The worker writes only "created", never the popup's "policy". Re-read so a
+    // concurrent popup revoke is kept; commands are already serialized by inFlight.
+    const latest = await stored();
+    const updated = recordCreated(job, result, latest.policy, latest.created);
+    if (updated) await chrome.storage.local.set({created: updated});
+  }
+  return result;
+}
+
+async function run(job, current) {
   if (job.kind === "rest" && job.method === "GET") return restGet(job);
   if (job.kind === "open") {
     const {did,wid,eid} = job.target;
@@ -38,7 +59,7 @@ async function execute(job) {
     return {tab_id:tab.id, url, status:tab.status, next:"Wait for native_state to succeed; opening a tab does not mean the editor is ready."};
   }
   if (job.kind === "tabs") {
-    return tabContext(chrome);
+    return tabContext(chrome, current);
   }
   const tab = await resolveTab(job);
   const results = await chrome.scripting.executeScript({target: {tabId: tab.id}, world: "MAIN",
@@ -52,19 +73,21 @@ async function connect() {
   if (!config.enabled || !BRIDGE_TOKEN || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
   const current = new WebSocket(BASE);
   socket = current;
-  current.onopen = () => current.send(JSON.stringify({type: "hello", token: BRIDGE_TOKEN,
-    version:chrome.runtime.getManifest().version,
-    capabilities:["tab_context_v1", "assembly_sidebar_map_v1", "display_v1"]}));
+  // The bridge sends a challenge on accept; nothing runs until it proves the token.
+  const receive = bridgeSession(current, BRIDGE_TOKEN, {version:chrome.runtime.getManifest().version,
+    capabilities:["tab_context_v1", "assembly_sidebar_map_v1", "display_v1", "policy_v1"]});
   current.onmessage = async event => {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
-    if (message.type === "ready") {
+    message = await receive(message);
+    if (message?.type === "ready") {
       chrome.action.setBadgeText({text: "ON"});
+      verified = current;
       clearInterval(heartbeat);
       heartbeat = setInterval(() => { if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({type: "ping"})); }, 20000);
       return;
     }
-    if (message.type !== "command") return;
+    if (message?.type !== "command") return;
     let result;
     if (inFlight) result = {error: "Previous command still running; inspect state before continuing."};
     else {
@@ -96,7 +119,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (socket) socket.close(); socket = null;
     connect().then(() => reply({ok: true})); return true;
   }
-  if (message.type === "status") reply({connected: socket?.readyState === WebSocket.OPEN});
+  if (message.type === "status") reply({connected: !!socket && verified === socket && socket.readyState === WebSocket.OPEN});
   if (message.type === "disconnect") {
     if (socket) socket.close(); socket = null; clearInterval(heartbeat); reply({ok: true});
   }

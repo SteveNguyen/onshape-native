@@ -2,6 +2,8 @@ import copy
 import pytest
 from pydantic import ValidationError
 from onshape_native.bridge import validate_job, BridgeError, create_app
+from onshape_native.client import BridgeAuth
+from onshape_native.config import mac
 from onshape_native.display import Reference, VisibilityChange, Display
 from onshape_native.store import Store
 from starlette.testclient import TestClient
@@ -52,12 +54,13 @@ def test_revision_and_exact_tab_required():
 
 def test_loaded_extension_capabilities_reported_and_old_workers_rejected():
     config={'host':'127.0.0.1','port':8766,'token':'x'*40}
-    client=TestClient(create_app(config),base_url="http://127.0.0.1:8766");auth={'Authorization':'Bearer '+config['token']}
+    client=TestClient(create_app(config),base_url="http://127.0.0.1:8766");auth=BridgeAuth(config['token'])
     with client.websocket_connect('/extension',headers={'origin':'chrome-extension://'+'a'*32}) as ws:
-        ws.send_json({'type':'hello','token':config['token']});ws.receive_json()
-        state=client.get('/health',headers=auth).json()
-        assert state['extension']=={'version':'unknown','capabilities':[]}
-        response=client.post('/command',headers=auth,json=job('inspect',{}))
+        nonce=ws.receive_json()['nonce']
+        ws.send_json({'type':'hello','nonce':'e'*32,'mac':mac(config['token'],f"ext\n{nonce}\n{'e'*32}"),'capabilities':['policy_v1']});ws.receive_json()
+        state=client.get('/health',auth=auth).json()
+        assert state['extension']=={'version':'unknown','capabilities':['policy_v1']}
+        response=client.post('/command',auth=auth,json=job('inspect',{}))
         assert response.status_code==400
         assert 'display_v1' in response.json()['error']
 

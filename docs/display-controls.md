@@ -1,10 +1,10 @@
 # Assembly display, motion and viewport controls
 
-Requires extension **0.4.0**, companion/MCP **0.4.0**, and an open, connected
+Requires extension **0.5.0**, companion/MCP **0.5.0**, and an open, connected
 Onshape workspace editor. No API keys, Console code, button automation, debugger
 permission or screen-sharing permission is needed for these operations.
 
-`bridge_status` must show `extension.version: "0.4.0"` (or newer) and capability
+`bridge_status` must show `extension.version: "0.5.0"` (or newer) and capability
 `display_v1`. Extension connectivity and Onshape editor connectivity differ:
 `display_state.connected` must be true for a fresh live model. A disconnected
 editor can still return its cached display tree/image; it cannot accept writes.
@@ -112,7 +112,7 @@ wrapper supports revolute mates, not every possible mate DOF.
 ## Camera and viewport
 
 `view_control` supports `read`, `save`, `restore`, `standard`, `orientation`,
-`fit`, and `zoom`. Except `read`, supply a fresh `expected_microversion`.
+`fit`, `zoom`, and the inspection actions below. Except `read`, supply a fresh `expected_microversion`.
 `save` returns `camera_id`; `restore` uses it in the same exact tab and restores
 orientation, position and zoom. Saving again replaces the previous handle.
 
@@ -131,6 +131,47 @@ optional `extents` accepts the six-number extents returned by camera readback
 with `action:"orientation", fit:false`, to reapply a saved scale after reload.
 Onshape adjusts those extents to the current viewport aspect ratio. These camera operations
 work in both Part Studios and assemblies.
+
+### Normal-to, section view, isolate and transparency
+
+Further `view_control` actions, each a revision-checked write returning observed state:
+
+| Action | Arguments | Effect and readback |
+|---|---|---|
+| `normal_to` | `plane` or `face`, optional `fit` | Onshape's normal-to camera, viewing from the + normal side; `camera`, `facing_normal` |
+| `section` | `plane` or `face` | Onshape's graphical section with one plane; material on the + normal side stays; `section_planes`, `verified` |
+| `section_off` | — | Restores the section planes saved before the first `section` |
+| `isolate` / `make_transparent` | assembly `occurrence_paths` or Part Studio `part_ids` | Onshape's isolate/transparent effect; `isolation.affected`, `verified` |
+| `exit_isolate` / `exit_make_transparent` | — | Clears the effect without animation |
+
+`plane` is `{"origin":[x,y,z],"normal":[x,y,z],"x_dir":[x,y,z]}` in **meters**;
+`x_dir` is optional. `face` is resolved server-side in a Part Studio at the
+expected revision: a FeatureScript Query or a face ID, e.g.
+`qCreatedBy(makeId("Top"), EntityType.FACE)`. The face's tangent plane at its
+centroid is used, with the outward normal. It must match exactly one face.
+Assemblies take explicit planes.
+
+```json
+{"url":"PART_STUDIO_URL","tab_id":123,"action":"section","face":"qCreatedBy(makeId(\"Right\"), EntityType.FACE)","expected_microversion":"CURRENT_MICROVERSION"}
+```
+
+A refused section (unsupported viewer, missing bundle helpers) changes nothing.
+Isolation and transparency are temporary effects; `display_state` visibility excludes
+them. Exit them, and call `section_off`, before finishing.
+
+### Server-rendered views and exact sections
+
+`render_views` never touches the editor. Views can be named views,
+`{"direction":[x,y,z],"up":[x,y,z]}` (direction points from model to viewer) or
+`{"face":"QUERY_OR_FACE_ID"}` (looking at the face, framed on it). It uses
+`snapshot` for a Part Studio or `url` for an assembly. Its matrices follow
+Onshape's standard frames: `[0,-1,0]` gives the front view.
+
+`evaluate(preset="section")` cuts solid bodies exactly in a temporary
+FeatureScript context with `plane:{"origin_mm":[…],"normal":[…]}` or a face
+`expression`. Each region has area, centroid, in-plane extents and per-edge
+boundary polylines in the plane's (u, v) mm. The (u, v) axes match a
+`render_views` direction view along the normal. The model is not modified.
 
 Call `capture_viewport`:
 
@@ -151,14 +192,12 @@ server-generated geometry images.
 
 All five tools are also `POST /local/TOOL_NAME` with identical JSON arguments:
 `display_state`, `set_visibility`, `mate_animation`, `view_control`,
-`capture_viewport`. Load the existing bearer token from the configured private
-runtime; never paste it into instructions or logs. Example (shell uses the
-existing `$ONSHAPE_NATIVE_TOKEN` environment variable):
+`capture_viewport`. Requests must be HMAC-signed per request (see the
+[security model](installation.md#security-model)); the token is never sent, so
+plain `curl` with a header does not work. Use the signing CLI:
 
 ```sh
-curl --fail-with-body http://127.0.0.1:8766/local/display_state \
-  -H "Authorization: Bearer $ONSHAPE_NATIVE_TOKEN" \
-  -H 'Content-Type: application/json' --data-binary @display-request.json
+.venv/bin/python scripts/request.py POST /local/display_state --body display-request.json
 ```
 
 HTTP viewport capture returns the local PNG artifact/path metadata; MCP also

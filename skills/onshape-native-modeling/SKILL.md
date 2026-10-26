@@ -25,8 +25,10 @@ MCP launcher starts or reuses the local HTTP companion. Do not request API keys.
    `element_tree(url=ELEMENT_URL)`. For an assembly use `element_tree` and the
    discovered assembly REST operations. Do not call `inspect_model` on assemblies.
 
-Keep that resolved URL throughout the task, even if the user switches browser
-tabs. A new URL overrides the previous target. Preserve configuration and `w/v/m`
+Work on the element `resolve_target` returns: that is what the user is looking at.
+If another element of the document seems more useful (e.g. a structured copy),
+say so and ask before switching. Keep that resolved URL throughout the task, even
+if the user switches browser tabs. A new URL overrides the previous target. Preserve configuration and `w/v/m`
 reference types. Versions and microversions are read-only; never silently edit a
 different workspace. Native editor commands require an unconfigured workspace
 element; the resolver's eligibility flag does not grant edit permission.
@@ -88,6 +90,19 @@ have backend operations. UI controls and native serializers can change with
 Onshape builds; report an actual unsupported operation rather than claiming
 every catalog candidate is verified.
 
+Assemblies:
+
+- `getAssemblyDefinition` omits mates unless `includeMateFeatures=true` (and
+  `includeMateConnectors=true` for connectors). Zero mates without it means nothing.
+- Before creating mates, fix one occurrence (`ui.assembly.GBTUiChangeOccurrenceFixedStatus`);
+  otherwise the solver may move the wrong part. Mate connectors: `BTMMateConnector-66`
+  with a face `CENTROID` inference; mate: `BTMMate-64` referencing both connector
+  feature IDs. Flip a mate with `primaryAxisAlignment` (`flipPrimary` is a mate
+  connector parameter). Check feature specs (`featurespecs`) instead of guessing
+  parameter IDs, then verify the solved pose with a render or capture.
+- Page `display_state` with its returned `snapshot`; without it each page re-reads
+  the editor.
+
 Refresh after writes. Check feature regeneration, exact dimensions/volume/body
 count, or assembly occurrence transforms/mates as appropriate. Weight requires
 material density and mass properties; volume alone is not mass. For organizational
@@ -112,6 +127,19 @@ Always restore a motion preview before finishing; after a model revision change,
 reload its current saved pose instead of applying old preview transforms.
 `capture_viewport` captures rendered markers; `render_views` serves a different
 purpose and cannot verify current editor visibility.
+
+To look at a part:
+
+- No editor change: `render_views` with named views, `{direction:[x,y,z]}` (model
+  to viewer) or `{face:"QUERY_OR_FACE_ID"}`.
+- Live editor: `view_control` `save`, then `normal_to` with a `face`/`plane` and
+  `capture_viewport`; `restore` the camera afterward.
+- Inside: `view_control` `section` (face or plane) + `capture_viewport` for the
+  image, `evaluate(preset="section")` for exact areas/extents/outlines. Place
+  planes in this element's frame: `origin:"center"` uses its own bounding box;
+  never reuse coordinates from another element.
+- Clutter: `isolate` or `make_transparent` (occurrence paths or part IDs).
+- Always restore: `section_off`, `exit_isolate`/`exit_make_transparent`, camera.
 
 Finish with the resulting Onshape link, changes, measurements/verification, and
 any incomplete behavior. Render views only when a visual question remains.
@@ -140,7 +168,8 @@ assembly recipes, and [coverage](../../docs/coverage.md) for evidence and limits
 Use `artifact_page` for saved responses instead of loading whole catalogs or
 large trees. All referenced files ship within this independent plugin.
 
-The equivalent HTTP interface is `http://127.0.0.1:8766` with a local bearer token
-from the configured `ONSHAPE_NATIVE_RUNTIME/bridge.json`. The companion owns the
+The equivalent HTTP interface is `http://127.0.0.1:8766` with HMAC-signed requests
+(`scripts/request.py`) using the token in the configured
+`ONSHAPE_NATIVE_RUNTIME/bridge.json`; the token itself is never sent. The companion owns the
 HTTP listener; the extension executes browser-session commands. Prefer MCP in
 both clients. Never expose pairing tokens, cookies or private model data in logs.

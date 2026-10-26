@@ -2,7 +2,11 @@
 <html lang="en"><meta charset="utf-8"><title>Onshape Native</title>
 <link rel="icon" type="image/png" href="icons/icon-32.png">
 <style>
-body{font:13px system-ui;margin:0;padding:16px;width:220px;background:#fff;color:#182523;display:flex;align-items:center;gap:10px}#dot{width:7px;height:7px;border-radius:50%;background:#adb5b2}#dot.on{background:#247e61}#status{flex:1}button{border:1px solid #d9dedc;background:#fff;border-radius:6px;padding:6px 10px;color:inherit;font:inherit;cursor:pointer}
+body{font:13px system-ui;margin:0;padding:16px;width:260px;background:#fff;color:#182523}.row{display:flex;align-items:center;gap:10px}#dot{width:7px;height:7px;border-radius:50%;background:#adb5b2}#dot.on{background:#247e61}#status,.grow{flex:1;min-width:0}button{border:1px solid #d9dedc;background:#fff;border-radius:6px;padding:6px 10px;color:inherit;font:inherit;cursor:pointer}section{border-top:1px solid #d9dedc;margin-top:12px;padding-top:10px}h2{font-size:11px;font-weight:600;color:#5d6b67;margin:0 0 6px;text-transform:uppercase}.muted{color:#5d6b67}.id{font:11px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}ul{list-style:none;margin:0;padding:0}li{padding:6px 0}li+li{border-top:1px solid #eef1f0}label{display:flex;align-items:center;gap:6px;margin-top:4px}
 </style>
-<span id="dot"></span><span id="status" role="status">Disconnected</span><button id="toggle">Connect</button>
+<div class="row"><span id="dot"></span><span id="status" role="status">Disconnected</span><button id="toggle">Connect</button></div>
+<section><h2>This tab</h2><div id="current" class="muted">No Onshape document in the active tab.</div></section>
+<section><h2>Authorized documents</h2><ul id="docs"></ul></section>
+<section><label><input type="checkbox" id="untested"> Advanced: allow untested native commands</label>
+<label><input type="checkbox" id="uifallback"> Advanced: allow UI fallback clicks</label></section>
 <script type="module" src="popup.js"></script></html>
