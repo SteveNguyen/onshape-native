@@ -48,8 +48,9 @@ When a call is refused and the error says an access request was filed: stop.
 Tell the user exactly what was requested (tab, branch, read/write or action) and
 why you need it, then wait for them to approve it in the popup before retrying.
 Never seek another route: no other endpoint, native command, UI click, copy or
-different tab to get the same data or effect. A refusal without a request means
-the operation is not allowed; report it. Never ask for merge, restore or admin
+different tab to get the same data or effect. A refusal that files no request
+(branch-wide write, overview, a toggle) is handled the same way: stop and tell
+the user what to grant in the popup. Never ask for merge, restore or admin
 unless the user asked for that operation; merge/restore also needs a one-shot
 popup approval per operation, consumed even if the call fails.
 
