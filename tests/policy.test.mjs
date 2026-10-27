@@ -524,7 +524,7 @@ test('document routes are classified', () => {
     `/api/v6/blobelements/d/${A}/w/${W}`, `/api/v6/variables/d/${A}/w/${W}/variablestudio`, `/api/v6/drawings/d/${A}/w/${W}/create`,
     `/api/v6/translations/d/${A}/w/${W}`]) needs(rest(path, 'POST', {body: {}}), [branchWrite(A, W), action(A, 'tabs')], path);
   needs(rest(`/api/v6/elements/copyelement/${A}/workspace/${W}`, 'POST', {body: {documentIdSource: B, workspaceIdSource: W2, elementIdSource: E2}}),
-    [branchWrite(A, W), action(A, 'tabs'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read')]);
+    [branchWrite(A, W), action(A, 'tabs'), tab(B, null, E2, 'read')]);
   needs(rest(`${d}/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'x'}}), [branch(A, W, 'read')]);
   for (const [path, method] of [[`${d}/${A}`, 'POST'], [`${d}/${A}/notes`, 'POST'], [`${d}/d/${A}/w/${W}/moveelement`, 'POST'],
     [`${d}/${A}`, 'DELETE'], [`${d}/${A}/share`, 'POST']]) {
@@ -552,8 +552,8 @@ test('element ids hidden in bodies are needs', () => {
   const asm = `/api/v6/assemblies/d/${A}/w/${W}/e/${E}/instances`;
   // Assembly createInstance: the inserted tab is a read need in any branch.
   needs(rest(asm, 'POST', {body: {documentId: A, elementId: E2, versionId: V}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read')]);
-  // An element id is checked against every document in scope: the object's own and the enclosing request document.
-  needs(rest(asm, 'POST', {body: {documentId: B, elementId: E2}}), [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read')]);
+  // A document key in the object scopes its element ids; the request document is only the fallback.
+  needs(rest(asm, 'POST', {body: {documentId: B, elementId: E2}}), [tab(A, W, E, 'write'), tab(B, null, E2, 'read')]);
   // No documentId: the request's document. Keys are case-insensitive, lists and arrays are split.
   needs(rest(asm, 'POST', {body: {ElementID: E2}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read')]);
   needs(rest(asm, 'POST', {body: {elementIds: `${E2},${C}`}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(A, null, C, 'read')]);
@@ -576,7 +576,7 @@ test('element ids hidden in bodies are needs', () => {
   // Native insert.
   const insert = {kind: 'native', target: {did: A, wid: W, eid: E}, command: 'ui.assembly.GBTUiAssemblyInsertOccurrence',
     body: {insertables: [{documentId: B, versionId: V, elementId: E2}, {namespace: `d${C}::v${V}::e${E2}`}]}};
-  needs(insert, [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read'), tab(C, null, E2, 'read')]);
+  needs(insert, [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(C, null, E2, 'read')]);
   // Without any document to scope it, an element reference is refused.
   assert.throws(() => classify(rest('/api/v6/comments', 'POST', {body: {elementId: E2, message: 'x'}})), /no document id/);
   // Authorization: a tab-only grant refuses a reference to another tab of the same document.
@@ -753,9 +753,8 @@ test('prefixed element ids are scoped by their prefixed document id', () => {
   // A prefixed pair keeps its own document; the plain element id is checked against every document of the object.
   const mixed = rest(`${app}/references`, 'POST', {body: {documentId: A, elementId: E2, targetDocumentId: B, targetElementId: T}});
   needs(mixed, [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(B, null, E2, 'read'), tab(B, null, T, 'read')]);
-  // Without its prefixed document, a prefixed element id is checked like a plain one.
-  hasNeed(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), tab(B, null, T, 'read'));
-  hasNeed(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), tab(A, null, T, 'read'));
+  // Without its prefixed document, a prefixed element id is checked like a plain one (the object's documents).
+  needs(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), [tab(A, W, E, 'write'), tab(B, null, T, 'read')]);
   hasNeed(rest(`${app}/references`, 'POST', {body: {targetElementId: T}}), tab(A, null, T, 'read'));
 });
 
@@ -877,11 +876,21 @@ test('element ids are scoped to every document the object names (BTDrawingParams
     refused(job, new RegExp(`tab ${SECRET} in any branch of document ${B}`), bTab);
     allowed(job, bSecret);
   }
-  // Only prefixed document keys: a bare element id needs read on each of them and on the enclosing document.
+  // BTDrawingParams needs read on both document keys, C and B.
+  hasNeed(rest(path, 'POST', {body: {documentId: C, externalDocumentId: B, elementId: SECRET}}), tab(C, null, SECRET, 'read'));
+  // Only prefixed document keys: a bare element id needs read on each of them, not on the enclosing document.
   const T = '7'.repeat(24);
-  const app = rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {sourceDocumentId: B, elementId: T}});
-  hasNeed(app, tab(B, null, T, 'read'));
-  hasNeed(app, tab(A, null, T, 'read'));
+  needs(rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {sourceDocumentId: B, elementId: T}}),
+    [tab(A, W, E, 'write'), tab(B, null, T, 'read')]);
+  // The enclosing document is the fallback for an object (and its nested values) without any document key.
+  needs(rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {ref: {elementId: T}}}),
+    [tab(A, W, E, 'write'), tab(A, null, T, 'read')]);
+  // Cross-document insert into an assembly of A: read on (B, E2) only.
+  const tabOnlyA = effectivePolicy({version: 2, docs: {[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}},
+    [B]: {branches: {[W]: {tabs: {[E2]: {mode: 'read'}}}}}}});
+  const insert = rest(`/api/v10/assemblies/d/${A}/w/${W}/e/${E}/instances`, 'POST', {body: {documentId: B, elementId: E2, versionId: V}});
+  needs(insert, [tab(A, W, E, 'write'), tab(B, null, E2, 'read')]);
+  allowed(insert, tabOnlyA);
   // A prefixed element id with its own prefixed document stays scoped to it.
   needs(rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {documentId: A, targetDocumentId: B, targetElementId: T}}),
     [tab(A, W, E, 'write'), tab(B, null, T, 'read')]);

@@ -207,8 +207,9 @@ const collect = found => (key, value) => {
 
 // Element references as tab read needs (any branch). `dids` is the enclosing document scope (the request's
 // document at the top). Which document an element id belongs to depends on the endpoint (BTDrawingParams pairs
-// documentId with an elementId of externalDocumentId), so an element id is checked against EVERY document in
-// scope: the object's generic documentId/documentIdSource/did, each "<prefix>DocumentId" and the enclosing scope.
+// documentId with an elementId of externalDocumentId), so an element id is checked against EVERY document key of
+// its object: generic documentId/documentIdSource/did and each "<prefix>DocumentId"; the enclosing scope is only
+// the fallback for an object (and its nested values) that names no document.
 // Only a "<prefix>ElementId" whose own "<prefix>DocumentId" is present stays scoped to it.
 // A reference with no document in scope is refused. Depth is bounded by walk() beforehand.
 function references(value, dids, out) {
@@ -234,15 +235,17 @@ function references(value, dids, out) {
     else if (key.endsWith("documentid")) { const p = key.slice(0, -"documentid".length); byPrefix.set(p, byPrefix.get(p) ?? new Set()); tokens(v, byPrefix.get(p)); }
   }
   const prefixed = [...byPrefix.values()].flatMap(s => [...s]);
-  // Plain element ids, nested values and namespaces: every document this object or its parent names.
-  const scope = [...new Set([...docs, ...prefixed, ...dids])].filter(Boolean);
+  // Plain element ids, nested values and namespaces: every document key of this object; the enclosing scope
+  // only as a fallback when the object names no document at all.
+  const own = [...new Set([...docs, ...prefixed])].filter(Boolean);
+  const scope = own.length ? own : [...new Set(dids)].filter(Boolean);
   if (!scope.length) scope.push(null);
   for (const [k, v] of entries) {
     text(k);
     if (isElementKey(k)) {
       // "<prefix>ElementId(s)" belongs to its own "<prefix>DocumentId" when present, else to every document in scope.
-      const own = byPrefix.get(k.toLowerCase().split("elementid")[0]);
-      const where = own?.size ? [...own] : scope;
+      const mine = byPrefix.get(k.toLowerCase().split("elementid")[0]);
+      const where = mine?.size ? [...mine] : scope;
       // Strings, comma lists and arrays of them; nested objects get their own scope below.
       const eids = new Set();
       for (const s of [v].flat(Infinity)) if (typeof s === "string") ids(s, eids);
