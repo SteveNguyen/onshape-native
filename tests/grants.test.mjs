@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ACTIONS, checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn} from "../extension/grants.js";
+import {ACTIONS, checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn, branchHasWrite} from "../extension/grants.js";
 
 const D = "a".repeat(24), W = "b".repeat(24), W2 = "c".repeat(24), E = "d".repeat(24), E2 = "e".repeat(24);
 const doc = (branches = {}, actions = {}) => ({added: 1, source: "user", actions, branches});
@@ -78,6 +78,17 @@ test("anyBranchMode: max over all branches", () => {
   assert.equal(anyBranchMode(p, D, E2), null);
   const q = pol({[D]: doc({[W]: {all: "read", tabs: {}}})});
   assert.equal(anyBranchMode(q, D, E2), "read");
+});
+
+test("branchHasWrite: whole-branch write or a written tab in that branch", () => {
+  const p = pol({[D]: doc({[W]: {all: "read", tabs: {[E]: {mode: "write"}}}, [W2]: {all: "read", tabs: {[E2]: {mode: "read"}}}})});
+  assert.equal(branchHasWrite(p, D, W), true);
+  assert.equal(branchHasWrite(p, D, W2), false);
+  assert.equal(branchHasWrite(p, D, "f".repeat(24)), false);
+  assert.equal(branchHasWrite(pol({[D]: doc({[W2]: {all: "write", tabs: {}}})}), D, W2.toUpperCase()), true);
+  const star = effectivePolicy(undefined, {docs: {[D]: {source: "created", added: 1, actions: {}, branches: {"*": {all: "write", tabs: {}}}}}});
+  assert.equal(branchHasWrite(star, D, W), true);
+  assert.equal(branchHasWrite(pol({}), D, W), false);
 });
 
 test("hasAnyGrant / actionOn", () => {

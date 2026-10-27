@@ -2,7 +2,7 @@
 // The agent may be prompt-injected by model text, so every job is reduced to "needs"
 // (a tab in a branch, a whole branch, a document overview, a document action) and
 // each need must be granted by the user. Anything unclassified is refused.
-import {checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn} from "./grants.js";
+import {checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, branchHasWrite, hasAnyGrant, actionOn} from "./grants.js";
 export {checkPolicy, effectivePolicy};
 
 const HEX = /^[0-9a-f]{24}$/i;
@@ -23,8 +23,10 @@ const SAFE_ID_KEYS = new Set([
   "nodeid", "nodeids", "featureid", "featureids", "partid", "partids", "groupid",  // feature tree, part and folder nodes
   "propertyid",  // metadata property ids (24-hex) in updateWVEMetadata
 ]);
-// Element ids in these keys are tab references (read, any branch) in the object's document.
-const ELEMENT_KEYS = new Set(["elementid", "elementids", "elementidsource", "eid"]);
+// Element ids in these keys are tab references (read, any branch) in the object's document:
+// "eid" and every "…elementId…" key (elementIds, elementIdSource, elementIdsToDelete, insertAfterElementId, …)
+// except the copyelement anchor, which only positions the copy in the destination.
+const isElementKey = key => { const k = key.toLowerCase(); return k === "eid" || (k.includes("elementid") && k !== "anchorelementid"); };
 const DOCUMENT_KEYS = ["documentid", "documentidsource", "did"];
 // Path ids after these segments are workspace/element/version/microversion ids,
 // translation ids, comment ids, tree node ids or export file ids, not documents.
@@ -60,6 +62,9 @@ export const NATIVE_READS = new Set([
 // Native commands that create, delete, rename, copy or regroup tabs (mirroring creates derived tabs).
 const NATIVE_TABS = new Set(["ui.document.GBTUiEditElementGroups", "ui.document.GBTUiDeleteElements", "ui.document.GBTUiCopyElements",
   "ui.document.GBTUiRenameElement", "ui.document.GBTUiInsertElement", "ui.GBTUiAssemblyMirrorCreateDerivedElements"]);
+// Of those, the ones that change existing tabs: their element references are writes in the target branch.
+// Copy, insert and mirror only read their sources.
+const NATIVE_TAB_EDITS = new Set(["ui.document.GBTUiEditElementGroups", "ui.document.GBTUiDeleteElements", "ui.document.GBTUiRenameElement"]);
 // Native commands that change the branch, create a version or rename the document: never through this extension.
 const NATIVE_REFUSED = new Set(["ui.document.GBTUiUpgradeWorkspaceCall", "ui.GBTUiWorkspaceRenamed",
   "ui.assembly.GBTUiCreateExternalReferenceVersion", "ui.GBTUiDocumentRenamed"]);
@@ -67,6 +72,8 @@ const TARGETED = {state: "read", schema: "read", open: "read", display: "read", 
 
 const tab = (did, wid, eid, mode) => ({did, type: "tab", wid, eid, mode});
 const branch = (did, wid, mode) => ({did, type: "branch", wid, mode});
+// Some write grant in the branch (whole branch or one tab): needed to create a tab there.
+const branchWrite = (did, wid) => ({did, type: "branch_write", wid});
 const overview = did => ({did, type: "overview"});
 const action = (did, name) => ({did, type: "action", action: name});
 
@@ -89,13 +96,13 @@ const DOC_ROUTES = [
   ["POST", `documents/d/${H}/workspaces`, d => [action(d, "branches")]],
   ["POST", `documents/${H}/workspaces/${H}/merge`, (d, w) => [action(d, "merge"), branch(d, w, "write")], "merge"],
   ["POST", `documents/${H}/w/${H}/restore/[vm]/[0-9a-f]{24}`, (d, w) => [action(d, "merge"), branch(d, w, "write")], "restore"],
-  // Tab creation.
-  ["POST", `(?:partstudios|assemblies|featurestudios|blobelements)/d/${H}/w/[0-9a-f]{24}`, d => [action(d, "tabs")]],
-  ["POST", `variables/d/${H}/w/[0-9a-f]{24}/variablestudio`, d => [action(d, "tabs")]],
-  ["POST", `drawings/d/${H}/w/[0-9a-f]{24}/create`, d => [action(d, "tabs")]],
-  ["POST", `translations/d/${H}/w/[0-9a-f]{24}`, d => [action(d, "tabs")]],
+  // Tab creation: the tabs action and a write grant in the destination branch.
+  ["POST", `(?:partstudios|assemblies|featurestudios|blobelements)/d/${H}/w/${H}`, (d, w) => [branchWrite(d, w), action(d, "tabs")]],
+  ["POST", `variables/d/${H}/w/${H}/variablestudio`, (d, w) => [branchWrite(d, w), action(d, "tabs")]],
+  ["POST", `drawings/d/${H}/w/${H}/create`, (d, w) => [branchWrite(d, w), action(d, "tabs")]],
+  ["POST", `translations/d/${H}/w/${H}`, (d, w) => [branchWrite(d, w), action(d, "tabs")]],
   // The source tab is a body reference (documentIdSource/elementIdSource), a read need.
-  ["POST", `elements/copyelement/${H}/workspace/[0-9a-f]{24}`, d => [action(d, "tabs")]],
+  ["POST", `elements/copyelement/${H}/workspace/${H}`, (d, w) => [branchWrite(d, w), action(d, "tabs")]],
   // Copying a branch to a new document reads every tab of it.
   ["POST", `documents/${H}/workspaces/${H}/copy`, (d, w) => [branch(d, w, "read")]],
   // Document attributes, notes and moving tabs to another document are admin.
@@ -150,7 +157,10 @@ function walk(value, visit, key = "", depth = 0) {
     else { visit("", k); walk(item, visit, k, depth + 1); }
   }
 }
-const collect = found => (key, value) => { if (typeof value === "string" && !SAFE_ID_KEYS.has(key.toLowerCase())) ids(value, found); };
+// Element-key values are tab references (see references()), not documents.
+const collect = found => (key, value) => {
+  if (typeof value === "string" && !SAFE_ID_KEYS.has(key.toLowerCase()) && !isElementKey(key)) ids(value, found);
+};
 
 // Element references as tab read needs (any branch). `dids` is the document scope:
 // an object's documentId/documentIdSource/did, else the enclosing scope (the request's document).
@@ -175,7 +185,7 @@ function references(value, dids, out) {
   if (!scope.length) scope.push(null);
   for (const [k, v] of entries) {
     text(k);
-    if (ELEMENT_KEYS.has(k.toLowerCase())) {
+    if (isElementKey(k)) {
       // Strings, comma lists and arrays of them; nested objects get their own scope below.
       const eids = new Set();
       for (const s of [v].flat(Infinity)) if (typeof s === "string") ids(s, eids);
@@ -209,9 +219,15 @@ function formFields(job) {
   return fields;
 }
 
-// A translation stored in the document creates a tab; anything but an explicit false stores.
-const storesInDocument = values => values.some(v => plain(v) && Object.entries(v).some(([k, x]) =>
-  k.toLowerCase() === "storeindocument" && ![undefined, null, false, "false"].includes(Array.isArray(x) ? x[0] : x)));
+// An export/translation stored in the document creates a tab. A storeInDocument key at any depth
+// stores unless every value it holds (arrays included) is explicitly false.
+function storesInDocument(values) {
+  let stores = false;
+  for (const value of values) walk(value, (key, v) => {
+    if (key.toLowerCase() === "storeindocument" && !Array.isArray(v) && ![undefined, null, false, "false"].includes(v)) stores = true;
+  });
+  return stores;
+}
 
 const refused = (job, why) => new Error(`${why}: ${job.method} ${job.path.slice(0, 120)}.`);
 
@@ -224,13 +240,16 @@ function elementNeeds(job, rest, values) {
   const post = job.method === "POST";
   if (job.method === "GET") return [tab(did, wid, eid, "read")];
   // Without a branch segment only configuration encoding is a read-only POST.
-  if (post && (wvm ? READ_POSTS.test(tail) : rest === `elements/d/${did}/e/${eid}/configurationencodings`) &&
-      !(tail === "translations" && storesInDocument(values))) return [tab(did, wid, eid, "read")];
+  // Exports and translations stored in the document create a tab: not reads.
+  const readPost = wvm ? READ_POSTS.test(tail) : rest === `elements/d/${did}/e/${eid}/configurationencodings`;
+  const stored = readPost && storesInDocument(values);
+  if (post && readPost && !stored) return [tab(did, wid, eid, "read")];
   if (!wid) throw refused(job, "Writes are only allowed in a workspace (/w/) branch; versions and microversions are read-only");
   if (job.method === "DELETE" && rest === `elements/d/${did}/w/${wid}/e/${eid}`) return [tab(did, wid, eid, "write"), action(did, "tabs")];
-  if (post && rest === `assemblies/d/${did}/w/${wid}/e/${eid}/bomelement`) return [tab(did, wid, eid, "read"), action(did, "tabs")];
-  // Element metadata holds the tab name (renaming a tab); a stored translation creates a tab.
-  if (post && (rest === `metadata/d/${did}/w/${wid}/e/${eid}` || tail === "translations")) return [tab(did, wid, eid, "write"), action(did, "tabs")];
+  if (post && rest === `assemblies/d/${did}/w/${wid}/e/${eid}/bomelement`)
+    return [tab(did, wid, eid, "read"), branchWrite(did, wid), action(did, "tabs")];
+  // Element metadata holds the tab name (renaming a tab); a stored export/translation creates a tab.
+  if (post && (rest === `metadata/d/${did}/w/${wid}/e/${eid}` || stored)) return [tab(did, wid, eid, "write"), action(did, "tabs")];
   return [tab(did, wid, eid, "write")];
 }
 
@@ -246,7 +265,11 @@ function classifyTargeted(job) {
   if (job.kind === "native") {
     const docs = new Set();
     walk(job.body, collect(docs));
-    references(job.body, [d], needs);
+    const refs = [];
+    references(job.body, [d], refs);
+    // Deleting, renaming or regrouping tabs changes the referenced tabs in the target branch.
+    const edits = NATIVE_TAB_EDITS.has(command);
+    for (const r of refs) needs.push(edits ? tab(r.did, w, r.eid, "write") : r);
     for (const id of docs) needs.push(overview(id));
   }
   return {needs: finish(needs), admin: false};
@@ -255,10 +278,10 @@ function classifyTargeted(job) {
 // Dedupe; an overview is implied by any tab or branch need on the same document.
 // Order: tab/branch needs first (they file access requests), then overviews, then actions.
 function finish(needs) {
-  const covered = new Set(needs.filter(n => n.type === "tab" || n.type === "branch").map(n => n.did));
+  const covered = new Set(needs.filter(n => ["tab", "branch", "branch_write"].includes(n.type)).map(n => n.did));
   const seen = new Map();
   for (const n of needs) if (!(n.type === "overview" && covered.has(n.did))) seen.set(JSON.stringify(n), n);
-  const rank = {tab: 0, branch: 0, overview: 1, action: 2};
+  const rank = {tab: 0, branch: 0, branch_write: 0, overview: 1, action: 2};
   return [...seen.values()].sort((a, b) => rank[a.type] - rank[b.type]);
 }
 
@@ -316,7 +339,13 @@ export function classify(job) {
 
   // Element references default to the request's document; without one, to every document the request names.
   const scope = requestDid ? [requestDid] : pathDids.size ? [...pathDids] : [...docs];
-  for (const value of values) references(value, scope, needs);
+  const refs = [];
+  for (const value of values) references(value, scope, refs);
+  if (rest === "comments") {
+    // Comments belong to a tab, not a branch: reading needs read on that tab, writing needs write (any branch).
+    if (!refs.length) throw refused(job, "Comments need the element id of a granted tab");
+    needs.push(...refs.map(r => write ? tab(r.did, null, r.eid, "write") : r));
+  } else needs.push(...refs);
   for (const did of [...pathDids, ...docs]) needs.push(overview(did));
   if (reason) for (const did of new Set(needs.map(n => n.did))) needs.push(action(did, "admin"));
   return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {})};
@@ -357,6 +386,8 @@ export function authorize(job, policy, approvals = {}, consumed = [], now = Date
       throw new AccessError(`No ${mode} access to tab ${eid} in ${wid ? `branch ${wid}` : "any branch"} of document ${did}. ${FILED}`, need);
     if (type === "branch" && !atLeast(branchMode(p, did, wid), mode))
       throw new AccessError(`No ${mode} access to the whole branch ${wid} of document ${did}. Ask the user to grant it in the Onshape Native popup ("Whole document in this branch").`, need);
+    if (type === "branch_write" && !branchHasWrite(p, did, wid))
+      throw new AccessError(`No write access in branch ${wid} of document ${did}: creating a tab needs a write grant on a tab or the whole branch. Ask the user to grant it in the Onshape Native popup.`, need);
     if (type === "overview" && !hasAnyGrant(p, did)) throw new Error(`Document ${did} is not authorized. ${ASK}`);
     if (type === "action" && !actionOn(p, did, need.action)) {
       if (need.action === "admin") throw new AccessError(`Admin action (${reason}) on document ${did} refused. Ask the user to enable the "admin" document action for it in the Onshape Native popup.`, need);

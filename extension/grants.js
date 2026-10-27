@@ -113,6 +113,12 @@ export function anyBranchMode(policy, did, eid) {
   return mode;
 }
 
+// Some write in one branch (whole branch, "*", or one tab): creating a tab there needs it.
+export function branchHasWrite(policy, did, wid) {
+  const tabs = branchesOf(policy, did)[wid?.toLowerCase()]?.tabs ?? {};
+  return branchMode(policy, did, wid) === "write" || Object.values(tabs).some(t => t?.mode === "write");
+}
+
 export const hasAnyGrant = (policy, did) =>
   Object.values(branchesOf(policy, did)).some(b => b.all || Object.keys(b.tabs ?? {}).length > 0);
 

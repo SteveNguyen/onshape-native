@@ -31,6 +31,7 @@ const tab = (did, wid, eid, mode) => ({did, type: 'tab', wid, eid, mode});
 const overview = did => ({did, type: 'overview'});
 const action = (did, name) => ({did, type: 'action', action: name});
 const branch = (did, wid, mode) => ({did, type: 'branch', wid, mode});
+const branchWrite = (did, wid) => ({did, type: 'branch_write', wid});
 const needs = (job, expected, msg) => assert.deepEqual(classify(job).needs.map(stable).sort(), expected.map(stable).sort(), msg ?? job.path ?? job.kind);
 const hasNeed = (job, need) => assert.ok(classify(job).needs.map(stable).includes(stable(need)), `${job.path ?? job.kind} needs ${stable(need)}`);
 
@@ -170,12 +171,11 @@ test('rest without a path document id is refused except a small allowlist', () =
   allowed(rest('/api/v6/translations/translationformats'));
   allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648'));
   allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648/s/300x170'));
-  // The comments collection is scoped by its document id, which must be authorized.
-  allowed(rest('/api/v6/comments', 'GET', {query: {did: A}}));
-  allowed(rest('/api/v6/comments', 'GET', {query: {documentId: A}}));
+  // The comments collection is scoped by its document and element, which must be granted.
+  allowed(rest('/api/v6/comments', 'GET', {query: {did: A, eid: E}}));
   allowed(rest('/api/v6/comments', 'POST', {body: {documentId: A, workspaceId: W, elementId: E, message: 'hi'}}));
-  refused(rest('/api/v6/comments', 'GET', {query: {did: B}}), /not authorized/);
-  refused(rest('/api/v6/comments', 'POST', {body: {documentId: B, message: 'hi'}}), /not authorized/);
+  refused(rest('/api/v6/comments', 'GET', {query: {did: B, eid: E}}), new RegExp(`document ${B}`));
+  refused(rest('/api/v6/comments', 'POST', {body: {documentId: B, elementId: E, message: 'hi'}}), new RegExp(`document ${B}`));
 });
 
 test('reviewer regressions: legitimate document-scoped endpoints are allowed', () => {
@@ -186,7 +186,7 @@ test('reviewer regressions: legitimate document-scoped endpoints are allowed', (
   // Document thumbnails render tab content: not an overview read, refused under v2.
   refused(rest(`/api/v6/thumbnails/document/${A}`), /not classified/);
   refused(rest(`/api/v6/thumbnails/document/${A}/version/${W}`), /not classified/);
-  allowed(rest('/api/v6/comments', 'GET', {query: {documentId: A}}));
+  allowed(rest('/api/v6/comments', 'GET', {query: {documentId: A, eid: E}}));
   allowed(rest('/api/v6/translations/translationformats'));
   allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648'));
   // api_upload to a document-scoped multipart endpoint.
@@ -343,7 +343,7 @@ test('element paths map to tab needs', () => {
   needs(rest(`/api/v6/elements/translatorFormats/${A}/w/${W}/${E}`), [tab(A, W, E, 'read')]);
   // Tab deletion and BOM creation also need the tabs action.
   needs(rest(`/api/v6/elements/d/${A}/w/${W}/e/${E}`, 'DELETE'), [tab(A, W, E, 'write'), action(A, 'tabs')]);
-  needs(rest(`/api/v6/assemblies/d/${A}/w/${W}/e/${E}/bomelement`, 'POST'), [tab(A, W, E, 'read'), action(A, 'tabs')]);
+  needs(rest(`/api/v6/assemblies/d/${A}/w/${W}/e/${E}/bomelement`, 'POST'), [tab(A, W, E, 'read'), branchWrite(A, W), action(A, 'tabs')]);
   // Element metadata holds the tab name: renaming a tab is a tabs action.
   needs(rest(`/api/v6/metadata/d/${A}/w/${W}/e/${E}`, 'POST', {body: {}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
   needs(rest(`/api/v6/metadata/d/${A}/w/${W}/e/${E}`), [tab(A, W, E, 'read')]);
@@ -371,7 +371,43 @@ test('read-only POSTs are reads', () => {
   needs(rest(tr, 'POST', {body: {storeInDocument: 'false'}}), [tab(A, W, E, 'read')]);
   for (const v of [true, 'true', 1]) needs(rest(tr, 'POST', {body: {storeInDocument: v}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
   needs(rest(tr, 'POST', {body: {StoreInDocument: true}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
-  assert.throws(() => classify(rest(`/api/v6/partstudios/d/${A}/v/${V}/e/${E}/translations`, 'POST', {body: {storeInDocument: true}})), /workspace/);
+  // Arrays store if any item is not explicitly false.
+  needs(rest(tr, 'POST', {body: {storeInDocument: ['false', 'true']}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
+  needs(rest(tr, 'POST', {body: {storeInDocument: ['false', false]}}), [tab(A, W, E, 'read')]);
+  needs(rest(tr, 'POST', form([['storeInDocument', 'false'], ['storeInDocument', 'true']])), [tab(A, W, E, 'write'), action(A, 'tabs')]);
+  // Every exporting read-only POST stores into the document the same way, for parts studios and assemblies.
+  for (const kind of ['partstudios', 'assemblies']) for (const tail of ['export', 'export/step', 'export/gltf', 'export/obj', 'translations']) {
+    needs(rest(`/api/v6/${kind}/d/${A}/w/${W}/e/${E}/${tail}`, 'POST', {body: {storeInDocument: true}}), [tab(A, W, E, 'write'), action(A, 'tabs')], `${kind} ${tail}`);
+    for (const wvm of ['v', 'm'])
+      assert.throws(() => classify(rest(`/api/v6/${kind}/d/${A}/${wvm}/${V}/e/${E}/${tail}`, 'POST', {body: {storeInDocument: true}})), /workspace/, `${kind} ${wvm} ${tail}`);
+  }
+});
+
+test('catalog read-only POSTs that can store in the document are not reads when they do', () => {
+  const spec = JSON.parse(fs.readFileSync(new URL('../data/openapi.json', import.meta.url), 'utf8'));
+  const deref = s => { while (s?.$ref) s = s.$ref.split('/').slice(1).reduce((o, k) => o[k], spec); return s; };
+  const stores = (s, seen = new Set()) => {
+    s = deref(s); if (!plain(s) || seen.has(s)) return false; seen.add(s);
+    if (Object.keys(s.properties ?? {}).some(k => k.toLowerCase() === 'storeindocument')) return true;
+    return [...(s.allOf ?? []), ...(s.oneOf ?? []), ...(s.anyOf ?? []), ...Object.values(s.properties ?? {}), s.items].some(x => stores(x, seen));
+  };
+  const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const fill = (path, wvm) => path.replace(/\{(wvm|wv|wm)\}/g, wvm).replace(/\{did\}/g, A).replace(/\{eid\}/g, E).replace(/\{\w+\}/g, wvm === 'w' ? W : V);
+  let checked = 0;
+  for (const [path, ops] of Object.entries(spec.paths)) {
+    const op = ops.post;
+    if (!op || !Object.values(op.requestBody?.content ?? {}).some(c => stores(c.schema))) continue;
+    // Only operations the classifier would otherwise treat as reads.
+    let read;
+    try { read = classify(rest(`/api/v10${fill(path, 'w')}`, 'POST', {body: {}})).needs.some(n => n.type === 'tab' && n.eid === E && n.mode === 'read'); }
+    catch { continue; }
+    if (!read) continue;
+    hasNeed(rest(`/api/v10${fill(path, 'w')}`, 'POST', {body: {storeInDocument: true}}), tab(A, W, E, 'write'));
+    hasNeed(rest(`/api/v10${fill(path, 'w')}`, 'POST', {body: {storeInDocument: true}}), action(A, 'tabs'));
+    if (/\{(wvm|wv)\}/.test(path)) assert.throws(() => classify(rest(`/api/v10${fill(path, 'v')}`, 'POST', {body: {storeInDocument: true}})), /workspace/, path);
+    checked++;
+  }
+  assert.ok(checked >= 11, `checked ${checked}`);
 });
 
 test('document routes are classified', () => {
@@ -392,9 +428,9 @@ test('document routes are classified', () => {
   }
   for (const path of [`/api/v6/partstudios/d/${A}/w/${W}`, `/api/v6/assemblies/d/${A}/w/${W}`, `/api/v6/featurestudios/d/${A}/w/${W}`,
     `/api/v6/blobelements/d/${A}/w/${W}`, `/api/v6/variables/d/${A}/w/${W}/variablestudio`, `/api/v6/drawings/d/${A}/w/${W}/create`,
-    `/api/v6/translations/d/${A}/w/${W}`]) needs(rest(path, 'POST', {body: {}}), [overview(A), action(A, 'tabs')], path);
+    `/api/v6/translations/d/${A}/w/${W}`]) needs(rest(path, 'POST', {body: {}}), [branchWrite(A, W), action(A, 'tabs')], path);
   needs(rest(`/api/v6/elements/copyelement/${A}/workspace/${W}`, 'POST', {body: {documentIdSource: B, workspaceIdSource: W2, elementIdSource: E2}}),
-    [overview(A), action(A, 'tabs'), tab(B, null, E2, 'read')]);
+    [branchWrite(A, W), action(A, 'tabs'), tab(B, null, E2, 'read')]);
   needs(rest(`${d}/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'x'}}), [branch(A, W, 'read')]);
   for (const [path, method] of [[`${d}/${A}`, 'POST'], [`${d}/${A}/notes`, 'POST'], [`${d}/d/${A}/w/${W}/moveelement`, 'POST'],
     [`${d}/${A}`, 'DELETE'], [`${d}/${A}/share`, 'POST']]) {
@@ -543,6 +579,60 @@ test('each action toggle', () => {
     // Another action's toggle does not help.
     refused(job, /is off/, grant(Object.fromEntries(['versions', 'branches', 'tabs'].filter(a => a !== name).map(a => [a, true]))));
   }
+});
+
+test('tab creation needs a write grant in the destination branch', () => {
+  const creates = wid => [rest(`/api/v6/partstudios/d/${A}/w/${wid}`, 'POST', {body: {name: 'x'}}),
+    rest(`/api/v6/assemblies/d/${A}/w/${wid}`, 'POST', {body: {}}), rest(`/api/v6/featurestudios/d/${A}/w/${wid}`, 'POST', {body: {}}),
+    rest(`/api/v6/blobelements/d/${A}/w/${wid}`, 'POST', form([['encodedFilename', 'a.step']], [['file', 'x']])),
+    rest(`/api/v6/variables/d/${A}/w/${wid}/variablestudio`, 'POST', {body: {}}), rest(`/api/v6/drawings/d/${A}/w/${wid}/create`, 'POST', {body: {}}),
+    rest(`/api/v6/translations/d/${A}/w/${wid}`, 'POST', {body: {}}),
+    rest(`/api/v6/elements/copyelement/${A}/workspace/${wid}`, 'POST', {body: {documentIdSource: A, elementIdSource: E}})];
+  // Read-only in W, tabs on: refused.
+  const readOnly = v2({[A]: {branches: {[W]: {all: 'read'}}, actions: {tabs: true}}});
+  for (const job of creates(W)) {
+    refused(job, new RegExp(`No write access in branch ${W} of document ${A}`), readOnly);
+    try { authorize(job, readOnly); } catch (error) { assert.deepEqual(error.need, branchWrite(A, W)); }
+  }
+  // One written tab in W, tabs on: allowed in W, refused in W2.
+  const oneTab = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}, actions: {tabs: true}}});
+  for (const job of creates(W)) allowed(job, oneTab);
+  for (const job of creates(W2)) refused(job, new RegExp(`branch ${W2}`), oneTab);
+  // BOM creation too.
+  refused(rest(`/api/v6/assemblies/d/${A}/w/${W}/e/${E}/bomelement`, 'POST'), /No write access in branch/, readOnly);
+});
+
+test('native tab edits need write on the referenced tabs in the target branch', () => {
+  const native = (command, body) => ({kind: 'native', target: {did: A, wid: W, eid: E}, command, body});
+  needs(native('ui.document.GBTUiDeleteElements', {elementIdsToDelete: [E2]}), [tab(A, W, E, 'write'), tab(A, W, E2, 'write'), action(A, 'tabs')]);
+  needs(native('ui.document.GBTUiRenameElement', {elementId: E2, name: 'x'}), [tab(A, W, E, 'write'), tab(A, W, E2, 'write'), action(A, 'tabs')]);
+  hasNeed(native('ui.document.GBTUiEditElementGroups', {groupChanges: {edits: [{elementId: E2}]}}), tab(A, W, E2, 'write'));
+  // Copy and insert only read their source tabs.
+  needs(native('ui.document.GBTUiCopyElements', {elementIdsToCopy: [E2]}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), action(A, 'tabs')]);
+  hasNeed(native('ui.document.GBTUiInsertElement', {insertAfterElementId: E2, name: 'x'}), tab(A, null, E2, 'read'));
+  // Write on (W, E), read on E2 only in W2, tabs on: deleting E2 from W is refused.
+  const p = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}, [W2]: {tabs: {[E2]: {mode: 'read'}}}}, actions: {tabs: true}}});
+  for (const body of [{elementIds: [E2]}, {elementIdsToDelete: [E2]}])
+    refused(native('ui.document.GBTUiDeleteElements', body), new RegExp(`No write access to tab ${E2} in branch ${W}`), p);
+  allowed(native('ui.document.GBTUiCopyElements', {elementIdsToCopy: [E2]}), p);
+  allowed(native('ui.document.GBTUiDeleteElements', {elementIdsToDelete: [E2]}),
+    v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}, [E2]: {mode: 'write'}}}}, actions: {tabs: true}}}));
+});
+
+test('comments need tab access on the referenced element', () => {
+  const p = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}, [E2]: {mode: 'read'}}}}}});
+  // Writes: tab write in any branch on (documentId, elementId); no element → refused.
+  needs(rest('/api/v6/comments', 'POST', {body: {documentId: A, workspaceId: W, elementId: E, message: 'hi'}}), [tab(A, null, E, 'write')]);
+  allowed(rest('/api/v6/comments', 'POST', {body: {documentId: A, elementId: E, message: 'hi'}}), p);
+  refused(rest('/api/v6/comments', 'POST', {body: {documentId: A, elementId: E2, message: 'hi'}}), new RegExp(`No write access to tab ${E2}`), p);
+  for (const body of [{documentId: A, message: 'hi'}, {documentId: A, workspaceId: W, message: 'hi'}])
+    refused(rest('/api/v6/comments', 'POST', {body}), /element/, p);
+  refused(rest('/api/v6/comments', 'DELETE', {body: {documentId: A, elementId: E2}}), /No write access/, p);
+  // Reads: tab read on the eid query parameter; a document-only listing is refused.
+  needs(rest('/api/v6/comments', 'GET', {query: {did: A, eid: E2}}), [tab(A, null, E2, 'read')]);
+  allowed(rest('/api/v6/comments', 'GET', {query: {did: A, eid: E2}}), p);
+  refused(rest('/api/v6/comments', 'GET', {query: {did: A, eid: C}}), new RegExp(`No read access to tab ${C}`), p);
+  for (const query of [{did: A}, {documentId: A}]) refused(rest('/api/v6/comments', 'GET', {query}), /element/, p);
 });
 
 test('merge needs toggle, whole-branch write and approval', () => {
