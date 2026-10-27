@@ -138,3 +138,112 @@ export const hasAnyGrant = (policy, did) =>
   Object.values(branchesOf(policy, did)).some(b => b.all || Object.keys(b.tabs ?? {}).length > 0);
 
 export const actionOn = (policy, did, action) => policy.docs?.[did?.toLowerCase()]?.actions?.[action] === true;
+
+// ---- popup model (pure; the popup is a thin DOM layer over these) ----
+// ctx = {did, wid, eid, docName, branchName, tabs: [{eid, name, type, folder?}]}; names are display-only.
+
+export const PRESETS = ["tab", "tab_read_rest", "branch"];
+const noActions = () => Object.fromEntries(ACTIONS.map(a => [a, false]));
+const tabName = (ctx, eid) => bound(ctx.tabs?.find(t => t?.eid?.toLowerCase() === eid)?.name);
+
+// Clone with the doc entry (and, if asked, the branch) present; new entries are user-sourced, all actions off.
+function withEntry(policy, ctx) {
+  const p = structuredClone(checkPolicy(policy));
+  const did = ctx.did.toLowerCase();
+  const entry = p.docs[did] ??= {added: Date.now(), source: "user", actions: noActions(), branches: {}};
+  if (!entry.name && bound(ctx.docName)) entry.name = bound(ctx.docName);
+  return {p, did, entry, wid: ctx.wid.toLowerCase()};
+}
+
+// Replaces only branches[wid] of this document; actions and other branches stay.
+export function applyPreset(policy, ctx, preset) {
+  if (!PRESETS.includes(preset)) throw new Error("applyPreset: unknown preset");
+  const eid = ctx.eid.toLowerCase();
+  const {p, entry, wid} = withEntry(policy, ctx);
+  const name = entry.branches[wid]?.name ?? (bound(ctx.branchName) || undefined);
+  const mine = {mode: "write", ...(tabName(ctx, eid) && {name: tabName(ctx, eid)})};
+  const b = preset === "branch" ? {all: "write", tabs: {}} : {...(preset === "tab_read_rest" && {all: "read"}), tabs: {[eid]: mine}};
+  entry.branches[wid] = name ? {name, ...b} : b;
+  return p;
+}
+
+// Sets the exact mode on one tab (may lower write to read); null removes it and prunes empty branch/doc entries.
+export function setTab(policy, ctx, eid, mode) {
+  eid = eid.toLowerCase();
+  if (mode !== null) {
+    const base = structuredClone(checkPolicy(policy));
+    delete base.docs[ctx.did.toLowerCase()]?.branches[ctx.wid.toLowerCase()]?.tabs[eid]; // grantTab only raises
+    return grantTab(base, ctx.did, ctx.wid, eid, mode, {doc: ctx.docName, branch: ctx.branchName, tab: tabName(ctx, eid)});
+  }
+  const p = structuredClone(checkPolicy(policy));
+  const did = ctx.did.toLowerCase(), wid = ctx.wid.toLowerCase();
+  const entry = p.docs[did], b = entry?.branches[wid];
+  if (!b) return p;
+  delete b.tabs[eid];
+  if (!b.all && !Object.keys(b.tabs).length) delete entry.branches[wid];
+  if (!Object.keys(entry.branches).length && !ACTIONS.some(a => entry.actions[a])) delete p.docs[did];
+  return p;
+}
+
+export function setAction(policy, did, action, on) {
+  if (!ACTIONS.includes(action) || typeof on !== "boolean") throw new Error("setAction: invalid action");
+  const p = structuredClone(checkPolicy(policy));
+  const entry = p.docs[did.toLowerCase()] ??= {added: Date.now(), source: "user", actions: noActions(), branches: {}};
+  entry.actions[action] = on;
+  return p;
+}
+
+export function revokeDocument(policy, did) {
+  const p = structuredClone(checkPolicy(policy));
+  delete p.docs[did.toLowerCase()];
+  return p;
+}
+
+// Which preset the stored grants of this branch match exactly (names ignored); nothing granted is "none".
+export function presetOf(policy, ctx) {
+  const b = branchesOf(checkPolicy(policy), ctx.did)[ctx.wid.toLowerCase()];
+  const eids = Object.keys(b?.tabs ?? {});
+  if (!b || (!b.all && !eids.length)) return "none";
+  const mine = eids.length === 1 && eids[0] === ctx.eid.toLowerCase() && b.tabs[eids[0]].mode === "write";
+  if (b.all === "write" && !eids.length) return "branch";
+  if (mine && !b.all) return "tab";
+  if (mine && b.all === "read") return "tab_read_rest";
+  return "custom";
+}
+
+// Plain-language account of the stored (effective) grants; must never under-state access.
+export function summary(policy, ctx) {
+  // Already-normalized effective policy (may hold "*"), so no checkPolicy here.
+  const p = policy ?? empty(), did = ctx.did.toLowerCase(), wid = ctx.wid.toLowerCase();
+  const all = branchesOf(p, did), star = all["*"], here = all[wid];
+  const on = ACTIONS.filter(a => actionOn(p, did, a));
+  const acts = on.filter(a => a !== "admin");
+  const tail = [];
+  if (acts.length) tail.push(`Document actions on: ${acts.join(", ")}.`);
+  if (on.includes("admin")) tail.push("Admin actions are ON.");
+  const others = Object.entries(all).filter(([w, b]) => w !== wid && w !== "*" && (b.all || Object.keys(b.tabs ?? {}).length));
+  if (others.length) tail.push(`+ ${others.length} other branch${others.length > 1 ? "es" : ""} with grants.`);
+  if (!hasAnyGrant(p, did)) {
+    return on.length ? ["Claude has no tab access in this document.", ...tail].join(" ") : "Claude has no access to this document.";
+  }
+  // This branch plus the "*" wildcard: tabs take the max mode, whole-branch the max of both.
+  const mm = {}; for (const b of [here, star]) if (b) unionBranches(mm, {m: b});
+  const m = mm.m ?? {tabs: {}};
+  const names = mode => Object.entries(m.tabs).filter(([, t]) => t.mode === mode).map(([e]) => tabName(ctx, e) || bound(m.tabs[e].name) || e);
+  const scope = star ? "all branches" : `branch ${bound(ctx.branchName) || wid}`;
+  const whole = star ? "the whole document in all branches" : `the whole branch ${bound(ctx.branchName) || wid}`;
+  const write = names("write"), read = names("read");
+  const out = [];
+  if (!write.length && m.all !== "write") {
+    const items = [...read, ...(m.all === "read" ? [whole] : [])];
+    out.push(items.length ? `Claude can read ${items.join(" and ")}${m.all === "read" ? "" : ` in ${scope}`}.` : `Claude has no access in ${scope}.`);
+  } else {
+    const items = [...write, ...(m.all === "write" ? [whole] : [])];
+    out.push(`Claude can read and edit ${items.join(", ")}${m.all === "write" ? "" : ` in ${scope}`}.`);
+    if (read.length) out.push(`Read only: ${read.join(", ")}.`);
+    if (m.all === "read") out.push(`Read: the rest of this ${star ? "document" : "branch"}.`);
+  }
+  out.push(...tail);
+  if (!tail.length) out.push("Nothing else.");
+  return out.join(" ");
+}

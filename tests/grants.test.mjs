@@ -197,3 +197,114 @@ test("grantTab: creates entries, keeps higher mode, sets bounded names, is pure"
   assert.throws(() => grantTab(p0, D, W, E, "owner"));
   assert.throws(() => grantTab(p0, D, "*", E, "read"));
 });
+
+// ---- popup model: presets and summary ----
+const ctx = {did: D, wid: W, eid: E, docName: "Reachy arm", branchName: "feature-gripper",
+             tabs: [{eid: E, name: "Gripper finger", type: "PARTSTUDIO"}, {eid: E2, name: "Gripper body", type: "PARTSTUDIO"}]};
+const W_ = {mode: "write"}, R_ = {mode: "read"};
+
+test("presetOf is exact", async () => {
+  const {applyPreset, presetOf, PRESETS} = await import("../extension/grants.js");
+  assert.deepEqual(PRESETS, ["tab", "tab_read_rest", "branch"]);
+  assert.equal(presetOf(pol({}), ctx), "none");
+  assert.equal(presetOf(pol({[D]: doc({[W]: {tabs: {}}})}), ctx), "none");
+  for (const p of PRESETS) assert.equal(presetOf(applyPreset(pol({}), ctx, p), ctx), p);
+  const tab = applyPreset(pol({}), ctx, "tab");
+  const extra = structuredClone(tab); extra.docs[D].branches[W].tabs[E2] = R_;
+  assert.equal(presetOf(extra, ctx), "custom");
+  const lowered = structuredClone(tab); lowered.docs[D].branches[W].tabs[E] = R_;
+  assert.equal(presetOf(lowered, ctx), "custom");
+  const rest = applyPreset(pol({}), ctx, "tab_read_rest");
+  rest.docs[D].branches[W].all = "write";
+  assert.equal(presetOf(rest, ctx), "custom");
+  // other branch's grants are ignored; names are ignored
+  const other = structuredClone(tab); other.docs[D].branches[W2] = {all: "write", tabs: {}};
+  assert.equal(presetOf(other, ctx), "tab");
+  assert.equal(presetOf(pol({[D]: doc({[W]: {name: "x", tabs: {[E]: {mode: "write", name: "y"}}}})}), ctx), "tab");
+  assert.equal(presetOf(pol({[D]: doc({[W]: {all: "read", tabs: {}}})}), ctx), "custom");
+});
+
+test("applyPreset leaves other branches and actions, creates the entry, is pure", async () => {
+  const {applyPreset} = await import("../extension/grants.js");
+  const p0 = pol({[D]: {...doc({[W]: {name: "Keep", all: "read", tabs: {[E2]: W_}}, [W2]: {all: "write", tabs: {}}}, {versions: true}), name: "N"}});
+  const before = structuredClone(p0);
+  const p1 = applyPreset(p0, ctx, "branch");
+  assert.deepEqual(p0, before);
+  assert.deepEqual(p1.docs[D].branches[W], {name: "Keep", all: "write", tabs: {}});
+  assert.deepEqual(p1.docs[D].branches[W2], p0.docs[D].branches[W2]);
+  assert.equal(p1.docs[D].actions.versions, true);
+  assert.equal(p1.docs[D].name, "N");
+  const p2 = applyPreset(pol({}), ctx, "tab_read_rest");
+  assert.equal(p2.docs[D].name, "Reachy arm");
+  assert.equal(p2.docs[D].source, "user");
+  assert.equal(typeof p2.docs[D].added, "number");
+  assert.deepEqual(p2.docs[D].actions, {versions: false, branches: false, merge: false, tabs: false, admin: false});
+  assert.equal(p2.docs[D].branches[W].name, "feature-gripper");
+  assert.deepEqual(p2.docs[D].branches[W].tabs, {[E]: {mode: "write", name: "Gripper finger"}});
+  assert.equal(p2.docs[D].branches[W].all, "read");
+  assert.throws(() => applyPreset(p0, ctx, "nope"));
+});
+
+test("setTab sets the exact mode, null removes and prunes empties", async () => {
+  const {setTab, applyPreset} = await import("../extension/grants.js");
+  const p1 = setTab(pol({}), ctx, E2, "write");
+  assert.equal(tabMode(p1, D, W, E2), "write");
+  assert.equal(p1.docs[D].branches[W].tabs[E2].name, "Gripper body");
+  const p2 = setTab(p1, ctx, E2, "read");
+  assert.equal(tabMode(p2, D, W, E2), "read");
+  const p3 = setTab(p2, ctx, E2, null);
+  assert.deepEqual(p3.docs, {});
+  assert.equal(tabMode(p2, D, W, E2), "read"); // pure
+  // keeps the doc when actions are on or other branches exist; keeps branch with all
+  const a = pol({[D]: doc({[W]: {tabs: {[E]: W_}}}, {tabs: true})});
+  assert.deepEqual(setTab(a, ctx, E, null).docs[D].branches, {});
+  const b = applyPreset(pol({}), ctx, "tab_read_rest");
+  assert.equal(setTab(b, ctx, E, null).docs[D].branches[W].all, "read");
+  const c = pol({[D]: doc({[W]: {tabs: {[E]: W_}}, [W2]: {all: "read", tabs: {}}})});
+  assert.deepEqual(Object.keys(setTab(c, ctx, E, null).docs[D].branches), [W2]);
+  assert.deepEqual(setTab(pol({}), ctx, E, null).docs, {});
+});
+
+test("setAction and revokeDocument", async () => {
+  const {setAction, revokeDocument} = await import("../extension/grants.js");
+  const p0 = pol({[D]: doc({[W]: {all: "read", tabs: {}}})});
+  const p1 = setAction(p0, D, "merge", true);
+  assert.equal(actionOn(p1, D, "merge"), true);
+  assert.equal(actionOn(p0, D, "merge"), false);
+  assert.equal(actionOn(setAction(p1, D, "merge", false), D, "merge"), false);
+  assert.throws(() => setAction(p0, D, "bogus", true));
+  assert.deepEqual(revokeDocument(p1, D).docs, {});
+  assert.ok(p1.docs[D]);
+});
+
+test("summary lists every grant and action", async () => {
+  const {summary, applyPreset, setAction} = await import("../extension/grants.js");
+  assert.equal(summary(pol({}), ctx), "Claude has no access to this document.");
+  const tab = applyPreset(pol({}), ctx, "tab");
+  assert.equal(summary(tab, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Nothing else.");
+  const rest = applyPreset(pol({}), ctx, "tab_read_rest");
+  assert.equal(summary(rest, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Read: the rest of this branch. Nothing else.");
+  const br = applyPreset(pol({}), ctx, "branch");
+  assert.equal(summary(br, ctx), "Claude can read and edit the whole branch feature-gripper. Nothing else.");
+  const v = setAction(setAction(tab, D, "versions", true), D, "tabs", true);
+  assert.equal(summary(v, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Document actions on: versions, tabs.");
+  const ad = setAction(tab, D, "admin", true);
+  assert.equal(summary(ad, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Admin actions are ON.");
+  const oth = structuredClone(tab);
+  oth.docs[D].branches[W2] = {all: "read", tabs: {}};
+  oth.docs[D].branches["f".repeat(24)] = {tabs: {[E2]: W_}};
+  assert.equal(summary(oth, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. + 2 other branches with grants.");
+  // read-only tab, unknown tab name falls back to id
+  const ro = pol({[D]: doc({[W]: {tabs: {[E]: R_, ["9".repeat(24)]: W_}}})});
+  assert.equal(summary(ro, ctx), `Claude can read and edit ${"9".repeat(24)} in branch feature-gripper. Read only: Gripper finger. Nothing else.`);
+  // grants only on another branch
+  assert.equal(summary(pol({[D]: doc({[W2]: {all: "read", tabs: {}}})}), ctx),
+    "Claude has no access in branch feature-gripper. + 1 other branch with grants.");
+  // "*" wildcard (created document) is stated
+  const star = pol({[D]: doc({"*": {all: "write", tabs: {}}})});
+  assert.equal(summary(star, ctx), "Claude can read and edit the whole document in all branches. Nothing else.");
+  // actions without grants
+  assert.equal(summary(pol({[D]: doc({}, {versions: true})}), ctx), "Claude has no tab access in this document. Document actions on: versions.");
+  // branch name falls back to id
+  assert.match(summary(tab, {...ctx, branchName: undefined}), new RegExp(`in branch ${W}\\.`));
+});
