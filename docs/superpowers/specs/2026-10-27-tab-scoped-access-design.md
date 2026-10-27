@@ -221,3 +221,24 @@ Rules:
 
 Storage encoding details, the document-level endpoint table (from the bundled
 REST catalog), popup styling, request id format, exact error wording.
+
+## Implementation notes (2026-10-27)
+
+Rulings taken during implementation that changed or extended this spec:
+
+- **Branch inheritance:** a branch Claude creates inherits the union of the
+  document's tab grants across its branches (not only the source branch's).
+- **Tab creation** needs a write grant on that branch (any tab write or branch
+  write), besides the *tabs* action.
+- **Comments:** writes need tab write on the referenced `elementId`; reads need
+  tab read on it. Comment calls with only a document id are refused.
+- **Merge/restore:** the one-shot approval is consumed before the job runs and
+  is single-use even if the job fails; they also need whole-branch write on the
+  target branch. The merge body's source `id` is an in-document reference
+  (workspace: branch read; version: overview).
+- **Created documents** are revocable from the popup; their `"*"` grant is kept
+  until revoked and unioned into any popup entry for the same document.
+- **Refused additionally:** document thumbnails, `permissionset` and parts
+  listings; `storeInDocument` exports/translations are tab creations. Tabs
+  created by them are not auto-granted (a request banner is filed instead).
+- **Banners:** branch-write and overview needs are not approvable from a banner.

@@ -20,7 +20,7 @@ The installer downloads the server, creates its Python environment, generates pr
 
 **Finish in your browser:** open its extensions page, enable Developer mode, choose **Load unpacked**, and select the extension folder printed by the installer. Sign in to Onshape, then restart your AI client. Browser approval cannot be automated by this installer.
 
-The AI client, server and Chromium browser must run on the same computer. The installer handles macOS, Linux and Windows paths; full browser setup has been tested on macOS only. See [installation and updates](docs/installation.md) and the [security model](docs/installation.md#security-model): the agent can only touch documents you authorize in the extension popup.
+The AI client, server and Chromium browser must run on the same computer. The installer handles macOS, Linux and Windows paths; full browser setup has been tested on macOS only. See [installation and updates](docs/installation.md) and the [security model](docs/installation.md#security-model): the agent can only touch the tabs you grant in the extension popup.
 
 ## What it does
 
