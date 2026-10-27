@@ -478,7 +478,9 @@ export function classify(job) {
   }
   for (const did of [...pathDids, ...docs]) needs.push(overview(did));
   if (reason) for (const did of new Set(needs.map(n => n.did))) needs.push(action(did, "admin"));
-  return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {})};
+  // Routes that create a new document (createDocument and the workspace copy) need the allow_create_documents opt-in.
+  const creates = job.method === "POST" && (rest === "documents" || new RegExp(`^documents/${H}/workspaces/${H}/copy$`).test(rest));
+  return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {}), ...(creates ? {creates} : {})};
 }
 
 // Thrown for an unmet tab/branch/action/approval need; the worker files a request from `need`.
@@ -508,7 +510,10 @@ export function authorize(job, policy, approvals = {}, consumed = {}, now = Date
   // Page controls are model text the worker cannot classify; off unless the user opts in.
   if ((job?.kind === "ui_inspect" || job?.kind === "ui_action") && p.allow_ui_fallback !== true)
     throw new Error('UI fallback is disabled. Ask the user to enable "Advanced: allow UI fallback clicks" in the extension popup.');
-  const {needs, admin, reason, critical} = classify(job);
+  const {needs, admin, reason, critical, creates} = classify(job);
+  // Plain Error: nothing to approve from a banner, so no access request is filed.
+  if (creates && p.allow_create_documents !== true)
+    throw new Error('Creating documents is disabled. Ask the user to enable "Advanced: allow creating new documents" in the Onshape Native popup.');
   if (admin && !needs.length) throw new Error(`Admin action (${reason}) refused: it names no authorized document.`);
   for (const need of needs) {
     const {did, type, wid, eid, mode} = need;

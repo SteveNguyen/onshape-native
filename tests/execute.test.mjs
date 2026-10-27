@@ -60,7 +60,7 @@ test("an AccessError files a request for the missing need and is rethrown", asyn
 });
 
 test("execute runs the authorized job with policy trust fields and records created documents", async () => {
-  const storage = fakeStorage({policy: {version: 2, docs: {}}});
+  const storage = fakeStorage({policy: {version: 2, docs: {}, allow_create_documents: true}});
   let seen;
   const job = {kind: "rest", method: "POST", path: "/api/v10/documents", query: {}, body: {name: "New"}, admin_allowed: true, allow_untested_native: true};
   await execute(job, {storage, run: async j => { seen = j; return {status: 200, body: {id: NEW, name: "New"}}; }});

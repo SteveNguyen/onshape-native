@@ -5,7 +5,7 @@ export const ACTIONS = ["versions", "branches", "merge", "tabs", "admin"];
 const HEX = /^[0-9a-f]{24}$/i;
 const MODES = ["read", "write"];
 const plain = v => v !== null && typeof v === "object" && !Array.isArray(v);
-const empty = () => ({version: 2, docs: {}, allow_untested_native: false, allow_ui_fallback: false});
+const empty = () => ({version: 2, docs: {}, allow_untested_native: false, allow_ui_fallback: false, allow_create_documents: false});
 const malformed = what => new Error(`Extension ${what} policy is malformed; ask the user to re-authorize in the Onshape Native popup.`);
 // Write implies read.
 const max = (a, b) => a === "write" || b === "write" ? "write" : a ?? b ?? null;
@@ -50,8 +50,9 @@ export function checkPolicy(policy) {
   if (policy === undefined) return empty();
   if (plain(policy) && policy.version !== 2) return {...empty(), stale: true};
   if (!plain(policy)) throw malformed("document");
-  for (const k of ["allow_untested_native", "allow_ui_fallback"]) if (policy[k] !== undefined && typeof policy[k] !== "boolean") throw malformed("document");
+  for (const k of ["allow_untested_native", "allow_ui_fallback", "allow_create_documents"]) if (policy[k] !== undefined && typeof policy[k] !== "boolean") throw malformed("document");
   return {...policy, allow_untested_native: policy.allow_untested_native === true, allow_ui_fallback: policy.allow_ui_fallback === true,
+          allow_create_documents: policy.allow_create_documents === true,
           docs: checkDocs(policy.docs, "document")};
 }
 
@@ -280,6 +281,7 @@ export function summary(policy, ctx) {
   // The worker cannot see what a page control does: say that clicks escape every grant.
   if (p.allow_ui_fallback === true) tail.push("Advanced: UI fallback clicks are ON — clicks in an open document are not limited to granted tabs, branches or document actions.");
   if (p.allow_untested_native === true) tail.push("Advanced: untested native commands are ON.");
+  if (p.allow_create_documents === true) tail.push("Advanced: creating new documents is ON.");
   const others = Object.entries(all).filter(([w, b]) => w !== wid && w !== "*" && (b.all || Object.keys(b.tabs ?? {}).length));
   if (others.length) tail.push(`+ ${others.length} other branch${others.length > 1 ? "es" : ""} with grants.`);
   if (!hasAnyGrant(p, did)) {

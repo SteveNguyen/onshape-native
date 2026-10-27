@@ -192,8 +192,9 @@ async function render() {
   if (ctx) $("summary").textContent = summary(s.eff, ctx);
   $("untested").checked = s.eff.allow_untested_native === true;
   $("uifallback").checked = s.eff.allow_ui_fallback === true;
+  $("createdocs").checked = s.eff.allow_create_documents === true;
 }
-for (const [id, key] of [["untested", "allow_untested_native"], ["uifallback", "allow_ui_fallback"]])
+for (const [id, key] of [["untested", "allow_untested_native"], ["uifallback", "allow_ui_fallback"], ["createdocs", "allow_create_documents"]])
   $(id).onchange = () => change(base => ({...structuredClone(checkPolicy(base)), [key]: $(id).checked}));
 
 // Listings are user-initiated popup reads (not agent jobs, not policy-checked); only for /w/ URLs.

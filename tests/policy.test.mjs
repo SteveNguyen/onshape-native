@@ -9,11 +9,12 @@ const W2 = '1'.repeat(24), E2 = '2'.repeat(24), V = '3'.repeat(24);
 // "Whole document A, read+write, tab actions on": what the v1 tests meant by an authorized document.
 // The popup cannot grant "*" (all branches), so it comes from a worker-created entry.
 const createdDoc = {source: 'created', added: 1, branches: {'*': {all: 'write', tabs: {}}}, actions: {tabs: true}};
+// Creating documents is off by default; these helpers opt in so the other tests can create (see the dedicated test below).
 const policy = (admin = false, extra = {}) => admin
-  ? effectivePolicy({version: 2, docs: {[A]: {branches: {[W]: {all: 'write', tabs: {}}}, actions: {admin: true, tabs: true}}}, ...extra})
-  : effectivePolicy({version: 2, docs: {}, ...extra}, {docs: {[A]: createdDoc}});
+  ? effectivePolicy({version: 2, docs: {[A]: {branches: {[W]: {all: 'write', tabs: {}}}, actions: {admin: true, tabs: true}}}, allow_create_documents: true, ...extra})
+  : effectivePolicy({version: 2, docs: {}, allow_create_documents: true, ...extra}, {docs: {[A]: createdDoc}});
 // Popup-only v2 policy (effective form).
-const v2 = (docs, extra = {}) => effectivePolicy({version: 2, docs, ...extra});
+const v2 = (docs, extra = {}) => effectivePolicy({version: 2, docs, allow_create_documents: true, ...extra});
 const rest = (path, method = 'GET', more = {}) => ({kind: 'rest', method, path, query: {}, body: null, ...more});
 const allowed = (job, p = policy(), ...more) => assert.doesNotThrow(() => authorize(job, p, ...more));
 const refused = (job, pattern, p = policy(), ...more) => assert.throws(() => authorize(job, p, ...more), pattern);
@@ -59,6 +60,25 @@ test('UI fallback needs its own popup opt-in, even with admin', () => {
     assert.throws(() => policy(true, {allow_ui_fallback: 'true'}), /malformed/);
   }
   allowed({kind: 'state', target: {did: A, wid: W, eid: E}});
+});
+
+test('creating documents needs the allow_create_documents opt-in (create and workspace copy)', () => {
+  const create = rest('/api/v6/documents', 'POST', {body: {name: 'x'}});
+  const copy = rest(`/api/v6/documents/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'x'}});
+  const off = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read', tabs: {}}}}}};
+  const offP = effectivePolicy(off), onP = effectivePolicy({...off, allow_create_documents: true});
+  refused(create, /Creating documents is disabled.*allow creating new documents.*popup/, offP);
+  refused(create, /Creating documents is disabled/, effectivePolicy({...off, allow_create_documents: false}));
+  allowed(create, onP);
+  // The copy keeps its whole-branch read need, and the flag alone is not enough.
+  refused(copy, /Creating documents is disabled/, offP);
+  refused(copy, /whole branch/, effectivePolicy({version: 2, docs: {}, allow_create_documents: true}));
+  allowed(copy, onP);
+  // Not an AccessError: no access request is filed.
+  assert.throws(() => authorize(create, offP), e => !(e instanceof AccessError));
+  assert.throws(() => authorize(copy, offP), e => !(e instanceof AccessError));
+  // Other routes are unaffected.
+  allowed(rest(`/api/v6/documents/${A}`), offP);
 });
 
 test('native bodies are scanned for other documents', () => {
@@ -294,8 +314,8 @@ test('create document authorizes it fully except admin', () => {
 
 test('workspace copy needs whole-branch read', () => {
   const copy = rest(`/api/v6/documents/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'Copy'}});
-  const tabOnly = {version: 2, docs: {[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}}};
-  const whole = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read'}}}}};
+  const tabOnly = {version: 2, docs: {[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}}, allow_create_documents: true};
+  const whole = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read'}}}}, allow_create_documents: true};
   refused(copy, /whole branch/i, effectivePolicy(tabOnly));
   allowed(copy, effectivePolicy(whole));
   const res = ok({newDocumentId: C, newDocumentName: ' Copy of X '});

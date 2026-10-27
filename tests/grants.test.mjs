@@ -11,7 +11,7 @@ test("ACTIONS lists the document actions", () => {
 });
 
 test("checkPolicy: undefined is an empty v2 policy", () => {
-  assert.deepEqual(checkPolicy(undefined), {version: 2, docs: {}, allow_untested_native: false, allow_ui_fallback: false});
+  assert.deepEqual(checkPolicy(undefined), {version: 2, docs: {}, allow_untested_native: false, allow_ui_fallback: false, allow_create_documents: false});
 });
 
 test("checkPolicy: v1 policy is stale and grants nothing", () => {
@@ -202,6 +202,9 @@ test("checkPolicy: flags must be boolean, default false", () => {
   assert.equal(p.allow_ui_fallback, false);
   assert.equal(p.allow_untested_native, false);
   assert.equal(checkPolicy({version: 2, docs: {}, allow_ui_fallback: true}).allow_ui_fallback, true);
+  assert.throws(() => checkPolicy({version: 2, docs: {}, allow_create_documents: "true"}), /malformed.*popup/);
+  assert.equal(p.allow_create_documents, false);
+  assert.equal(checkPolicy({version: 2, docs: {}, allow_create_documents: true}).allow_create_documents, true);
 });
 
 test("grantTab: creates entries, keeps higher mode, sets bounded names, is pure", async () => {
@@ -357,6 +360,7 @@ test("summary flags advanced switches", async () => {
   const ui = "Advanced: UI fallback clicks are ON — clicks in an open document are not limited to granted tabs, branches or document actions.";
   assert.equal(summary({...t, allow_ui_fallback: true}, ctx), `Claude can read and edit "Gripper finger" in branch "feature-gripper". ${ui}`);
   assert.equal(summary({...t, allow_untested_native: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: untested native commands are ON.');
+  assert.equal(summary({...t, allow_create_documents: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: creating new documents is ON.');
   assert.ok(summary({...pol({}), allow_ui_fallback: true}, ctx).endsWith(`no tab access in this document. ${ui}`));
 });
 
