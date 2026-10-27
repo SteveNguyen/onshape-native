@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ACTIONS, checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn, branchHasWrite} from "../extension/grants.js";
+import {ACTIONS, checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn, branchHasWrite, seedFromCreated} from "../extension/grants.js";
 
 const D = "a".repeat(24), W = "b".repeat(24), W2 = "c".repeat(24), E = "d".repeat(24), E2 = "e".repeat(24);
 const doc = (branches = {}, actions = {}) => ({added: 1, source: "user", actions, branches});
@@ -125,6 +125,32 @@ test("effectivePolicy: popup actions win over a created entry for the same doc",
   const base = pol({[D]: doc({}, {merge: false})});
   const created = {docs: {[D]: {source: "created", added: 1, actions: {merge: true}, branches: {}}}, grants: {}};
   assert.equal(actionOn(effectivePolicy(base, created), D, "merge"), false);
+});
+
+test("effectivePolicy: popup entry keeps created '*' grants, popup actions win, no mutation", () => {
+  const base = pol({[D]: doc({[W]: {tabs: {[E]: {mode: "read"}}}}, {merge: false})});
+  const created = {docs: {[D]: {source: "created", added: 1, actions: {merge: true, tabs: true}, branches: {"*": {all: "write", tabs: {}}}}}};
+  const snap = structuredClone(base);
+  const p = effectivePolicy(base, created);
+  assert.equal(tabMode(p, D, W, E2), "write");
+  assert.equal(branchMode(p, D, W2), "write");
+  assert.equal(actionOn(p, D, "merge"), false);
+  assert.equal(actionOn(p, D, "tabs"), false);
+  assert.deepEqual(base, snap);
+});
+
+test("seedFromCreated: copies created actions (admin off) only for a created-only doc; pure", () => {
+  const created = {docs: {[D]: {source: "created", added: 5, name: "N", actions: {versions: true, merge: true, admin: true}, branches: {"*": {all: "write", tabs: {}}}}}};
+  const snap = structuredClone(created);
+  const p = seedFromCreated(undefined, created, D);
+  assert.deepEqual(p.docs[D].actions, {versions: true, branches: false, merge: true, tabs: false, admin: false});
+  assert.deepEqual(p.docs[D].branches, {});
+  assert.equal(p.docs[D].name, "N");
+  assert.deepEqual(created, snap);
+  const existing = pol({[D]: doc({}, {tabs: true})});
+  assert.deepEqual(seedFromCreated(existing, created, D).docs[D].actions.merge, false);
+  assert.deepEqual(seedFromCreated(undefined, created, E).docs, {});
+  assert.deepEqual(seedFromCreated(undefined, created, 5).docs, {});
 });
 
 test("effectivePolicy: old flat v1 created map is ignored", () => {

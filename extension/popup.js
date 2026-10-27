@@ -1,5 +1,5 @@
 import {didFromUrl, docName, docLabel, targetFromUrl} from "./policy.js";
-import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, effectivePolicy, presetOf, revokeDocument, setAction, setTab, summary, tabMode} from "./grants.js";
+import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
 import {approve, approveOnce, liveRequests} from "./requests.js";
 import {branchNames, tabsFromContents} from "./listings.js";
 
@@ -35,25 +35,33 @@ async function load() {
   // A v1 or malformed policy is replaced by a fresh empty v2 on the first change (base undefined), never on open.
   return {...s, stored, eff, stale: stored.stale === true, base: stored.stale ? undefined : s.policy};
 }
-async function change(fn) {
-  const s = await load(); const policy = fn(s.base); delete policy.stale;
+// seedDid: a document whose created-only entry must first become a stored entry (keeps its actions).
+async function change(fn, seedDid) {
+  const s = await load(); const policy = fn(seedDid ? seedFromCreated(s.base, s.created, seedDid) : s.base); delete policy.stale;
   await chrome.storage.local.set({policy});
 }
 const resolve = id => chrome.runtime.sendMessage({type: "resolve_request", id});
 
 // ---- banners ----
 function describe(need) {
-  const here = need.did?.toLowerCase() === ctx?.did, mode = String(need.mode ?? "").toUpperCase();
-  const tab = here && ctx.tabs.find(t => t.eid === need.eid?.toLowerCase());
-  const wid = need.wid?.toLowerCase();
-  const branch = need.wid ? (here && (wid === ctx.wid ? ctx.branchName : branches[wid])) || need.wid : "any branch";
-  const where = here ? "" : ` of document ${need.did}`;
+  // Request fields are untrusted data: non-strings render as "?".
+  const str = v => typeof v === "string" ? v : "?";
+  const did = str(need.did), eid = str(need.eid), wid = typeof need.wid === "string" ? need.wid.toLowerCase() : null;
+  const here = did.toLowerCase() === ctx?.did, mode = String(need.mode ?? "").toUpperCase();
+  const tab = here && ctx.tabs.find(t => t.eid === eid.toLowerCase());
+  const branch = wid ? (here && (wid === ctx.wid ? ctx.branchName : branches[wid])) || wid : "any branch";
+  const where = here ? "" : ` of document ${did}`;
   switch (need.type) {
-    case "tab": return `${mode} ${tab ? `"${tabLabel(tab)}"` : `tab ${need.eid}`} in ${branch}${where}`;
+    case "tab": {
+      const name = tab ? `"${tabLabel(tab)}"` : `tab ${eid}`;
+      // A branch-free need is granted on the branch the popup shows, so say which.
+      if (!wid) return here && ctx.wvm === "w" ? `${mode} ${name} on this branch (${ctx.branchName || ctx.wid})` : `${mode} ${name} in any branch${where} (open this document to approve)`;
+      return `${mode} ${name} in ${branch}${where}`;
+    }
     case "branch": return `${mode} the whole branch ${branch}${where}`;
     case "branch_write": return `WRITE in branch ${branch}${where} (create a tab)`;
     case "action": return `enable document action "${need.action}"${where}`;
-    case "overview": return `list the tabs of document ${need.did}`;
+    case "overview": return `list the tabs of document ${did}`;
     default: return `${need.type}${where}`;
   }
 }
@@ -62,7 +70,7 @@ function banner(s, r) {
   const deny = el("button", {textContent: "Deny", onclick: () => resolve(r.id)});
   if (need.type === "approval") {
     // Merge/restore: a one-time approval of this exact request, only while the document's merge action is on.
-    const live = s.approvals?.[need.key] > Date.now(), ready = actionOn(s.eff, need.did, "merge");
+    const live = s.approvals?.[need.key] > Date.now(), ready = typeof need.did === "string" && typeof need.key === "string" && actionOn(s.eff, need.did, "merge");
     node.append(el("div", {textContent: `Claude asks to ${need.critical} (once): ${r.method ?? ""} ${r.path_summary ?? ""} in document ${need.did}`}),
       el("div", {className: "muted small", textContent: "Can overwrite others' work. Approval is used once, for this exact request."}));
     if (!ready) node.append(el("div", {className: "warn small", textContent: "Turn on Merge / restore in Document actions first."}));
@@ -73,7 +81,8 @@ function banner(s, r) {
   node.append(el("div", {textContent: `Claude asks to ${describe(need)}`}));
   if (reasons.has(r.id)) node.append(el("div", {className: "warn small", textContent: reasons.get(r.id)}));
   node.append(el("div", {className: "row"}, el("button", {textContent: "Allow", onclick: async () => {
-    const {base} = await load();
+    const s = await load();
+    const base = seedFromCreated(s.base, s.created, need.did);  // a created document keeps its actions
     const names = {doc: ctx?.docName, branch: ctx?.branchName, tab: openTab()?.name};
     const res = approve(base, r, {did: ctx?.did, wid: ctx?.wid, eid: ctx?.eid, names});
     if (!res.ok) { reasons.set(r.id, res.reason); return render(); }
@@ -105,12 +114,12 @@ function renderPresets(s) {
   const labels = {tab: `This tab only: read + write ${openTab()?.name || ctx.eid}`, tab_read_rest: "This tab, read the rest of the document (this branch)",
     branch: "Whole document in this branch", custom: "Custom…"};
   sec.replaceChildren(...[...PRESETS, "custom"].map(p => el("label", {}, el("input", {type: "radio", name: "preset", checked: now === p,
-    onchange: () => p === "custom" ? ($("custom").open = true) : change(base => applyPreset(base, ctx, p))}), labels[p])));
+    onchange: () => p === "custom" ? ($("custom").open = true) : change(base => applyPreset(base, ctx, p), ctx.did)}), labels[p])));
 }
 function treeRow(s, t) {
   const mode = tabMode(s.eff, ctx.did, ctx.wid, t.eid), whole = branchMode(s.eff, ctx.did, ctx.wid);
   const box = (label, on, locked, set) => el("label", {className: "cb", title: locked ? "Granted by the whole-branch grant" : ""},
-    el("input", {type: "checkbox", checked: on, disabled: locked, onchange: e => change(base => setTab(base, ctx, t.eid, set(e.target.checked)))}), label);
+    el("input", {type: "checkbox", checked: on, disabled: locked, onchange: e => change(base => setTab(base, ctx, t.eid, set(e.target.checked)), ctx.did)}), label);
   // Write ticks Read; unticking Read clears the tab.
   return el("div", {className: "row trow" + (t.eid === ctx.eid ? " open" : "")}, el("span", {className: "grow title", textContent: tabLabel(t)}),
     box("R", !!mode, !!whole, on => on ? "read" : null), box("W", mode === "write", whole === "write", on => on ? "write" : "read"));
@@ -133,13 +142,14 @@ function renderActions(s) {
   const sec = $("actions"); sec.hidden = !ctx;
   if (sec.hidden) return;
   $("actionsBody").replaceChildren(...ACTIONS.map(a => el("div", {}, el("label", {}, el("input", {type: "checkbox", checked: actionOn(s.eff, ctx.did, a),
-    onchange: e => change(base => setAction(base, ctx.did, a, e.target.checked))}), ACTION_LABELS[a]),
+    onchange: e => change(base => setAction(base, ctx.did, a, e.target.checked), ctx.did)}), ACTION_LABELS[a]),
     ...(WARNINGS[a] ? [el("div", {className: "warn small", textContent: WARNINGS[a]})] : []))));
 }
 function renderAll(s) {
   const items = Object.entries(s.eff.docs).map(([id, entry]) => el("li", {className: "row"},
     el("span", {className: "id grow", textContent: docLabel(id, entry) + (entry.source === "created" ? " (created)" : "")}),
-    ...(Object.hasOwn(s.stored.docs, id) ? [el("button", {textContent: "Revoke", onclick: () => change(base => revokeDocument(base, id))})] : [])));
+    // Drops the stored entry, and the worker drops the created entry and grants (it owns "created").
+    el("button", {textContent: "Revoke", onclick: async () => { await change(base => revokeDocument(base, id)); await chrome.runtime.sendMessage({type: "revoke_created", did: id}); }})));
   $("docs").replaceChildren(...(items.length ? items : [el("li", {className: "muted", textContent: "None. The agent can only list tabs."})]));
 }
 async function render() {

@@ -168,6 +168,15 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     }).then(() => reply({ok: true}));
     return true;
   }
+  if (message.type === "revoke_created") {
+    // Popup Revoke: the worker is the single writer of "created", so it drops the document and its grants.
+    chrome.storage.local.get("created").then(({created}) => {
+      const id = typeof message.did === "string" ? message.did.toLowerCase() : null;
+      const drop = obj => Object.fromEntries(Object.entries(obj ?? {}).filter(([k]) => k.toLowerCase() !== id));
+      return id && created ? chrome.storage.local.set({created: {...created, docs: drop(created.docs), grants: drop(created.grants)}}) : null;
+    }).then(() => reply({ok: true}));
+    return true;
+  }
   if (message.type === "disconnect") {
     if (socket) socket.close(); socket = null; clearInterval(heartbeat); reply({ok: true});
   }

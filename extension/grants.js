@@ -77,7 +77,10 @@ export function effectivePolicy(policy, created = {}) {
   const made = created.docs === undefined ? {} : checkDocs(created.docs, "created-document", true);
   for (const [did, entry] of Object.entries(made)) {
     if (entry.actions.admin) throw malformed("created-document");
-    docs[did] ??= entry;
+    if (!docs[did]) { docs[did] = entry; continue; }
+    // Popup entry wins for actions; the created entry's branches (incl. "*") are unioned in, never dropped.
+    docs[did] = {...docs[did], branches: structuredClone(docs[did].branches)};
+    unionBranches(docs[did].branches, structuredClone(entry.branches));
   }
   // Grants contribute branches/tabs only (never actions, never "*") and only to known documents.
   if (created.grants !== undefined && !plain(created.grants)) throw malformed("created-document");
@@ -193,6 +196,18 @@ export function setAction(policy, did, action, on) {
   const p = structuredClone(checkPolicy(policy));
   const entry = p.docs[did.toLowerCase()] ??= {added: Date.now(), source: "user", actions: noActions(), branches: {}};
   entry.actions[action] = on;
+  return p;
+}
+
+// Before a popup change on a document that exists only in `created`: gives it a stored entry carrying the
+// created entry's actions (admin stays off), so the new entry does not switch the other actions off.
+export function seedFromCreated(policy, created, did) {
+  const p = structuredClone(checkPolicy(policy));
+  const id = typeof did === "string" ? did.toLowerCase() : "";
+  const made = plain(created?.docs) ? created.docs[id] : undefined;
+  if (!plain(made) || p.docs[id]) return p;
+  const actions = Object.fromEntries(ACTIONS.map(a => [a, a !== "admin" && made.actions?.[a] === true]));
+  p.docs[id] = {added: typeof made.added === "number" ? made.added : Date.now(), source: "created", ...(optName(made.name) && made.name && {name: made.name}), actions, branches: {}};
   return p;
 }
 
