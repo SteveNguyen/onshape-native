@@ -79,6 +79,18 @@ test('creating documents needs the allow_create_documents opt-in (create and wor
   assert.throws(() => authorize(copy, offP), e => !(e instanceof AccessError));
   // Other routes are unaffected.
   allowed(rest(`/api/v6/documents/${A}`), offP);
+  // moveelement with isNewDocument creates a document: needs the flag on top of admin.
+  const mv = body => rest(`/api/v6/documents/d/${A}/w/${W}/moveelement`, 'POST', {body});
+  const adminOff = policy(true, {allow_create_documents: false}), adminOn = policy(true);
+  for (const body of [{isNewDocument: true}, {ISNEWDOCUMENT: 'true'}, {x: {isNewDocument: [false, true]}}]) {
+    refused(mv(body), /Creating documents is disabled/, adminOff);
+    allowed(mv(body), adminOn);
+    refused(mv(body), /admin/i, effectivePolicy({...off, allow_create_documents: true}));
+  }
+  for (const body of [{isNewDocument: false}, {isNewDocument: 'false'}, {isNewDocument: null}, {isNewDocument: 0}, {name: 'x'}]) {
+    allowed(mv(body), adminOff);
+    assert.equal(classify(mv(body)).creates, undefined);
+  }
 });
 
 test('native bodies are scanned for other documents', () => {

@@ -479,7 +479,12 @@ export function classify(job) {
   for (const did of [...pathDids, ...docs]) needs.push(overview(did));
   if (reason) for (const did of new Set(needs.map(n => n.did))) needs.push(action(did, "admin"));
   // Routes that create a new document (createDocument and the workspace copy) need the allow_create_documents opt-in.
-  const creates = job.method === "POST" && (rest === "documents" || new RegExp(`^documents/${H}/workspaces/${H}/copy$`).test(rest));
+  // Moving a tab with isNewDocument (any case, any depth; an array counts if any item does) creates a document too.
+  const on = v => Array.isArray(v) ? v.some(on) : !(v == null || v === false || v === 0 || v === "" || v === "false");
+  let newDoc = false;
+  if (job.method === "POST" && new RegExp(`^documents/d/${H}/w/[0-9a-f]{24}/moveelement$`).test(rest))
+    walk(job.body, (key, v) => { if (key.toLowerCase() === "isnewdocument" && on(v)) newDoc = true; });
+  const creates = job.method === "POST" && (rest === "documents" || newDoc || new RegExp(`^documents/${H}/workspaces/${H}/copy$`).test(rest));
   return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {}), ...(creates ? {creates} : {})};
 }
 
