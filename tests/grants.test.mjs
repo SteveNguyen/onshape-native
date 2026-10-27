@@ -177,3 +177,23 @@ test("checkPolicy: flags must be boolean, default false", () => {
   assert.equal(p.allow_untested_native, false);
   assert.equal(checkPolicy({version: 2, docs: {}, allow_ui_fallback: true}).allow_ui_fallback, true);
 });
+
+test("grantTab: creates entries, keeps higher mode, sets bounded names, is pure", async () => {
+  const {grantTab} = await import("../extension/grants.js");
+  const p0 = pol({});
+  const p1 = grantTab(p0, D, W, E, "read", {doc: "Robot", branch: "Main", tab: "Arm"});
+  assert.deepEqual(p0.docs, {});
+  assert.deepEqual(p1.docs[D].actions, {versions: false, branches: false, merge: false, tabs: false, admin: false});
+  assert.equal(p1.docs[D].name, "Robot");
+  assert.equal(p1.docs[D].branches[W].name, "Main");
+  assert.equal(p1.docs[D].branches[W].tabs[E].name, "Arm");
+  assert.equal(tabMode(p1, D, W, E), "read");
+  const p2 = grantTab(p1, D, W, E, "write");
+  assert.equal(tabMode(p2, D, W, E), "write");
+  assert.equal(p2.docs[D].name, "Robot");
+  assert.equal(tabMode(grantTab(p2, D, W, E, "read"), D, W, E), "write");
+  assert.equal(grantTab(p0, D, W, E, "read", {doc: "x".repeat(500), branch: 3}).docs[D].name.length, 120);
+  assert.equal(grantTab(p0, D, W, E, "read", {branch: 3}).docs[D].branches[W].name, undefined);
+  assert.throws(() => grantTab(p0, D, W, E, "owner"));
+  assert.throws(() => grantTab(p0, D, "*", E, "read"));
+});

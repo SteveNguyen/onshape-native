@@ -119,7 +119,22 @@ export function branchHasWrite(policy, did, wid) {
   return branchMode(policy, did, wid) === "write" || Object.values(tabs).some(t => t?.mode === "write");
 }
 
-export const hasAnyGrant = (policy, did) =>
+// Same bound as docName in policy.js (not imported: policy.js imports this file). Display-only.
+const bound = t => typeof t === "string" ? t.trim().slice(0, 120) : "";
+
+// Grants `mode` on one tab of one branch (popup-side, pure). Creates the doc entry (all actions off),
+// never downgrades an existing tab mode, and sets optional display names {doc, branch, tab}.
+export function grantTab(policy, did, wid, eid, mode, names = {}) {
+  if (!MODES.includes(mode) || !HEX.test(did) || !HEX.test(wid) || !HEX.test(eid)) throw new Error("grantTab: invalid id or mode");
+  const p = structuredClone(checkPolicy(policy));
+  const entry = p.docs[did.toLowerCase()] ??= {actions: Object.fromEntries(ACTIONS.map(a => [a, false])), branches: {}};
+  const branch = entry.branches[wid.toLowerCase()] ??= {tabs: {}};
+  const tab = branch.tabs[eid.toLowerCase()] = {...branch.tabs[eid.toLowerCase()], mode: max(branch.tabs[eid.toLowerCase()]?.mode, mode)};
+  for (const [target, key] of [[entry, "doc"], [branch, "branch"], [tab, "tab"]]) if (bound(names?.[key])) target.name = bound(names[key]);
+  return p;
+}
+
+export const hasAnyGrant =(policy, did) =>
   Object.values(branchesOf(policy, did)).some(b => b.all || Object.keys(b.tabs ?? {}).length > 0);
 
 export const actionOn = (policy, did, action) => policy.docs?.[did?.toLowerCase()]?.actions?.[action] === true;
