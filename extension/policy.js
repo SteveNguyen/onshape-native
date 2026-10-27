@@ -77,7 +77,7 @@ export const NATIVE_KNOWN = new Set([
 // An untested command (the "allow untested native commands" opt-in) must not reach versioning, branches, release,
 // sharing, permissions, locks, comments, thumbnails or document/collaboration-level commands: those are document
 // actions, not tab edits. Case-insensitive, so it also refuses some harmless names (e.g. "...Block..."): fail closed.
-const NATIVE_DOCUMENT_LEVEL = /Version|Workspace|Branch|Release|Revision|Merge|Restore|Publication|Share|Permission|Lock|Comment|Thumbnail/i;
+const NATIVE_DOCUMENT_LEVEL = /Version|Workspace|Branch|Release|Revision|Merge|Restore|Publication|Publish|Share|Permission|Lock|Comment|Thumbnail/i;
 // Native commands that create, delete, rename, copy or regroup tabs (mirroring creates derived tabs).
 const NATIVE_TABS = new Set(["ui.document.GBTUiEditElementGroups", "ui.document.GBTUiDeleteElements", "ui.document.GBTUiCopyElements",
   "ui.document.GBTUiRenameElement", "ui.document.GBTUiInsertElement", "ui.GBTUiAssemblyMirrorCreateDerivedElements"]);
@@ -217,10 +217,10 @@ function references(value, dids, out) {
     if (!did) throw new Error("Element reference names no document id; refused.");
     out.push(tab(did, null, eid.toLowerCase(), "read"));
   };
-  const text = s => {
+  const text = (s, where = dids) => {
     const named = new Set();
     for (const m of s.matchAll(NAMESPACE)) { add(m[1].toLowerCase(), m[2]); named.add(m[2].toLowerCase()); }
-    for (const m of s.matchAll(ELEMENT)) if (!named.has(m[1].toLowerCase())) for (const did of dids) add(did, m[1]);
+    for (const m of s.matchAll(ELEMENT)) if (!named.has(m[1].toLowerCase())) for (const did of where) add(did, m[1]);
   };
   if (typeof value === "string") return text(value);
   if (value === null || typeof value !== "object") return;
@@ -241,7 +241,7 @@ function references(value, dids, out) {
   const scope = own.length ? own : [...new Set(dids)].filter(Boolean);
   if (!scope.length) scope.push(null);
   for (const [k, v] of entries) {
-    text(k);
+    text(k, scope);  // element tokens in a key belong to this object's documents, like its values
     if (isElementKey(k)) {
       // "<prefix>ElementId(s)" belongs to its own "<prefix>DocumentId" when present, else to every document in scope.
       const mine = byPrefix.get(k.toLowerCase().split("elementid")[0]);
@@ -368,9 +368,15 @@ function finish(needs) {
 // {defaultRestoreStrategy, elementIdToStrategyOverride}. The merge source is a branch (read need) or a version
 // (overview only); override keys are element ids (tab reads). Returns the needs and the body left to scan.
 const OVERRIDES = {merge: "mergestrategyelementoverrides", restore: "elementidtostrategyoverride"};
+const DECISIVE_EXACT = new Set(["id", "type", "defaultMergeStrategy", "defaultRestoreStrategy"]);
+const DECISIVE = new Set([...DECISIVE_EXACT].map(k => k.toLowerCase()));
 function criticalBody(job, did, critical) {
   const body = job.body ?? {};
   if (!plain(body)) throw refused(job, "Merge/restore body must be a JSON object");
+  // The decisive fields are authorized and shown to the user by their exact key: a case variant ("ID",
+  // "DefaultMergeStrategy") could be what the server reads instead, so it is refused.
+  if (Object.keys(body).some(k => DECISIVE.has(k.toLowerCase()) && !DECISIVE_EXACT.has(k)))
+    throw refused(job, "Merge/restore body has a case variant of id, type or a default strategy key");
   const needs = [], rest = {};
   for (const [k, v] of Object.entries(body)) {
     const key = k.toLowerCase();

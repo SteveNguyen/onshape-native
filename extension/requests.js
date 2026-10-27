@@ -22,9 +22,9 @@ export function describeJob(job) {
   const path = String(job?.path ?? "").split("?")[0];
   const out = {method: String(job?.method ?? "").slice(0, 10), path_summary: path.slice(0, 200)};
   const body = plain(job?.body) ? job.body : {};
-  // Keys are matched case-insensitively, as policy.js reads the override maps.
-  const field = name => Object.entries(body).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
-  const text = name => typeof field(name) === "string" ? field(name).slice(0, 80) : null;
+  // Decisive fields are read by their exact key, as the server and policy.js read them (policy.js refuses
+  // case-variant duplicates); override maps are counted case-insensitively, as policy.js reads them.
+  const text = name => Object.hasOwn(body, name) && typeof body[name] === "string" ? body[name].slice(0, 80) : null;
   const count = name => Object.entries(body).filter(([k, v]) => k.toLowerCase() === name.toLowerCase() && plain(v))
     .reduce((n, [, v]) => n + Object.keys(v).length, 0);
   const restore = path.match(/\/restore\/([vm])\/([0-9a-f]{24})$/i);

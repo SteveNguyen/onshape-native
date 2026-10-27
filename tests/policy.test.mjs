@@ -956,7 +956,7 @@ test('untested native commands cannot reach document-level operations', () => {
   const p = v2({[A]: {branches: {[W]: {all: 'write'}}, actions: {tabs: true, versions: true, branches: true, merge: true, admin: true}}}, {allow_untested_native: true});
   for (const c of ['ui.collaboration.GBTUiReleasePackageWorkflowMessage', 'ui.document.GBTUiSetDocumentThumbnailMessage', 'ui.GBTUiElementLockRequest',
     'ui.GBTUiCreateVersionCall', 'ui.GBTUiMergeWorkspaces', 'ui.GBTUiRestoreElement', 'ui.GBTUiBranchFromHere', 'ui.GBTUiAddCommentCall',
-    'ui.GBTUiSharePublicLink', 'ui.GBTUiSetPermission', 'ui.GBTUiPublicationAdd', 'ui.GBTUiRevisionCreate', 'ui.document.GBTUiAnything', 'ui.collaboration.GBTUiAnything'])
+    'ui.GBTUiSharePublicLink', 'ui.GBTUiSetPermission', 'ui.GBTUiPublicationAdd', 'ui.GBTUiRevisionCreate', 'ui.GBTUiPublish', 'ui.document.GBTUiAnything', 'ui.collaboration.GBTUiAnything'])
     refused(native(c), /refused/, p);
   // Verified, read and tab commands keep working; untested modeling commands still pass to the page's own opt-in check.
   for (const c of ['ui.GBTUiCommit', 'ui.document.GBTUiEditElementGroups', 'ui.document.GBTUiRenameElement', 'ui.document.GBTUiQueryInsertables',
@@ -969,6 +969,24 @@ test('known native commands mirror the page adapter allowlist', () => {
   const page = new Set([...block.matchAll(/"([\w.]+)"/g)].map(m => m[1]));
   assert.ok(page.size >= 20);
   assert.deepEqual([...NATIVE_KNOWN].sort(), [...new Set([...page, ...NATIVE_READS])].sort());
+});
+
+test('merge/restore bodies with case-variant duplicates of decisive keys are refused', () => {
+  const url = `/api/v10/documents/${A}/workspaces/${W}/merge`;
+  for (const body of [{ID: W2, id: V, type: 'workspace'}, {id: W2, Type: 'version', type: 'workspace'},
+    {id: V, type: 'version', DefaultMergeStrategy: 'KEEP_TARGET', defaultMergeStrategy: 'KEEP_SOURCE'}, {id: V, type: 'version', DEFAULTMERGESTRATEGY: 'x'}])
+    assert.throws(() => classify(rest(url, 'POST', {body})), /case/i, JSON.stringify(body));
+  const restore = `/api/v10/documents/${A}/w/${W}/restore/v/${V}`;
+  assert.throws(() => classify(rest(restore, 'POST', {body: {DefaultRestoreStrategy: 'x', defaultRestoreStrategy: 'y'}})), /case/i);
+  // Exact keys still classify.
+  assert.equal(classify(rest(url, 'POST', {body: {id: V, type: 'version', defaultMergeStrategy: 'KEEP_SOURCE'}})).critical, 'merge');
+  assert.equal(classify(rest(restore, 'POST', {body: {defaultRestoreStrategy: 'y'}})).critical, 'restore');
+});
+
+test('element tokens in object keys use the object scope', () => {
+  const SECRET = '5'.repeat(24);
+  needs(rest(`/api/v10/partstudios/d/${A}/w/${W}/e/${E}/features`, 'POST', {body: {documentId: B, [`e${SECRET}`]: 1}}),
+    [tab(A, W, E, 'write'), tab(B, null, SECRET, 'read')]);
 });
 
 test('refusals say whether a request was filed or what to enable', () => {

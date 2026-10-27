@@ -63,9 +63,13 @@ test("describeJob shows what a merge or restore will do", () => {
   assert.deepEqual(describeJob(merge({id: W2, type: "workspace", defaultMergeStrategy: "OVERWRITE",
     mergeStrategyElementOverrides: {[E]: "KEEP", [E2]: "OVERWRITE"}, note: "secret"})).details,
     {kind: "merge", type: "workspace", id: W2, strategy: "OVERWRITE", overrides: 2});
-  // Missing or non-string fields are null; strings are bounded; key case follows the policy (case-insensitive).
-  assert.deepEqual(describeJob(merge({id: 5, Type: "version", DefaultMergeStrategy: "x".repeat(500)})).details,
+  // Missing or non-string fields are null; strings are bounded; decisive keys are read exactly as policy.js does.
+  assert.deepEqual(describeJob(merge({id: 5, type: "version", defaultMergeStrategy: "x".repeat(500)})).details,
     {kind: "merge", type: "version", id: null, strategy: "x".repeat(80), overrides: 0});
+  // Case variants never override what the job sends (the policy also refuses such bodies).
+  assert.deepEqual(describeJob(merge({ID: W2, id: E, type: "workspace", DefaultMergeStrategy: "KEEP_TARGET", defaultMergeStrategy: "KEEP_SOURCE"})).details,
+    {kind: "merge", type: "workspace", id: E, strategy: "KEEP_SOURCE", overrides: 0});
+  assert.equal(describeJob(merge({Type: "version", DefaultMergeStrategy: "x"})).details.type, null);
   assert.deepEqual(describeJob(merge(undefined)).details, {kind: "merge", type: null, id: null, strategy: null, overrides: 0});
   const restore = (vm, body) => ({kind: "rest", method: "POST", path: `/api/v10/documents/${D}/w/${W}/restore/${vm}/${W2}`, body});
   assert.deepEqual(describeJob(restore("v", {defaultRestoreStrategy: "KEEP", elementIdToStrategyOverride: {[E]: "OVERWRITE"}})).details,
