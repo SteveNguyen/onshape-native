@@ -44,5 +44,15 @@
     ],
     "cleanup": "all test features, connectors, mate and instance deleted; Part Studio back to Import 1 in both branches; branch 'tabscope merge test' left for the user to delete in Onshape (the plugin cannot delete branches)"
   },
+  "editing_areas": {
+    "grants": "Custom: Write on 'test_claudeA' and 'Assembly 1', Read on 'Part Studio 1'; Tabs action on; merge and branches off",
+    "checks": [
+      {"check": "sidebar_edit: create, rename, delete a feature folder; suppress and unsuppress Import 1 (native editor commands)", "result": "allowed, all steps OK"},
+      {"check": "document_edit: create a Part Studio tab, rename it, delete it", "result": "allowed, verified"},
+      {"check": "custom material (density 1200) on part JFD via part metadata + mass properties", "result": "allowed; mass/volume = 1200 kg/m3. Onshape REST cannot remove a material (null/empty rejected); left for the user to clear"},
+      {"check": "set_visibility hide/show an occurrence of Assembly 1", "result": "allowed, verified"},
+      {"check": "mate_animation prepare, step to 90 deg, restore on the revolute mate", "result": "allowed, restored"}
+    ]
+  },
   "not_covered": ["restore one-shot approval end to end", "Pollen account"]
 }
