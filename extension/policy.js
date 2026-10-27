@@ -41,7 +41,7 @@ const NO_DOCUMENT = [
   ["POST", /^documents$/],           // createDocument; the new did is auto-authorized
   ["GET", /^translations\/[0-9a-f]{24}$/],  // translation status polling
   ["GET", /^translations\/translationformats$/],
-  ["GET", /^thumbnails\/[0-9a-f]{32,64}(?:\/s\/\d+x\d+)?$/],  // content-hash thumbnailUri images
+  // No content-hash thumbnails (thumbnails/<hash>): an image of a tab's content, not scoped by any document.
 ];
 // Exact path segments, never substrings of ids or names.
 const ADMIN_SEGMENTS = new Set(["share", "unshare", "sharewithsupport", "unsharefromsupport", "acl", "permission", "permissions",
@@ -59,6 +59,25 @@ export const NATIVE_READS = new Set([
   "ui.GBTUiMassPropCall", "ui.GBTUiGetQueryDataCall", "ui.document.GBTUiQueryInsertables",
   "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest",
 ]);
+// Every native command the page adapter accepts without the untested opt-in (its `allowed` set, kept equal
+// by a JS test) plus the reads.
+export const NATIVE_KNOWN = new Set([
+  "ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiUpdateEditRollbackState", "ui.GBTUiAddFeatureCall",
+  "ui.GBTUiBeginEdit", "ui.GBTUiCommit", "ui.GBTUiSetFeatureSettingsCall", "ui.GBTUiMeasureCall",
+  "ui.GBTUiRenameFeature", "partstudiofolders.GBTUiCreateFolder",
+  "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchStartInferencing",
+  "ui.sketch.GBTUiSketchFinishInferencing", "ui.sketch.GBTUiSketchChangeInferencingMode",
+  "ui.sketch.GBTUiSketchAddRectangleCall", "ui.sketch.GBTUiSketchAddCircleCall",
+  "ui.sketch.GBTUiSketchGetProjectionCall", "ui.sketch.GBTUiSketchAddDimensionCall",
+  "ui.sketch.GBTUiSketchModifyDimensionCall",
+  "ui.assembly.GBTUiAssemblyInsertOccurrence", "ui.GBTUiBatchPartPropertyChange", "ui.assembly.GBTUiChangeOccurrenceFixedStatus",
+  "ui.GBTUiSpecifyFeature", "ui.document.GBTUiEditElementGroups", "partstudiofolders.GBTUiDeleteFolder", "ui.GBTUiReorderFeatures",
+  ...NATIVE_READS,
+]);
+// An untested command (the "allow untested native commands" opt-in) must not reach versioning, branches, release,
+// sharing, permissions, locks, comments, thumbnails or document/collaboration-level commands: those are document
+// actions, not tab edits. Case-insensitive, so it also refuses some harmless names (e.g. "...Block..."): fail closed.
+const NATIVE_DOCUMENT_LEVEL = /Version|Workspace|Branch|Release|Revision|Merge|Restore|Publication|Share|Permission|Lock|Comment|Thumbnail/i;
 // Native commands that create, delete, rename, copy or regroup tabs (mirroring creates derived tabs).
 const NATIVE_TABS = new Set(["ui.document.GBTUiEditElementGroups", "ui.document.GBTUiDeleteElements", "ui.document.GBTUiCopyElements",
   "ui.document.GBTUiRenameElement", "ui.document.GBTUiInsertElement", "ui.GBTUiAssemblyMirrorCreateDerivedElements"]);
@@ -68,7 +87,29 @@ const NATIVE_TAB_EDITS = new Set(["ui.document.GBTUiEditElementGroups", "ui.docu
 // Native commands that change the branch, create a version or rename the document: never through this extension.
 const NATIVE_REFUSED = new Set(["ui.document.GBTUiUpgradeWorkspaceCall", "ui.GBTUiWorkspaceRenamed",
   "ui.assembly.GBTUiCreateExternalReferenceVersion", "ui.GBTUiDocumentRenamed"]);
-const TARGETED = {state: "read", schema: "read", open: "read", display: "read", ui_inspect: "read", ui_action: "write", native: null};
+const TARGETED = {state: "read", schema: "read", open: "read", display: null, ui_inspect: "read", ui_action: "write", native: null};
+// Display operations (extension/display-adapter.js) by what they change:
+// - inspect, capture: read the editor and viewport only.
+// - camera (all actions, incl. section/section_off and isolate/make_transparent and their exits): view state of
+//   this browser tab only; nothing is sent to the document (section passes the element connection to Onshape's
+//   graphical-section helper, which the adapter reports as "this tab only; the model is unchanged").
+// - motion start/stop/step/status/restore: renderer transforms of a prepared preview session, client-only.
+// - visibility: GBTUiBatchVisibilityChange, persisted in the assembly and seen by collaborators → write.
+// - motion prepare: sends GBTUiAssemblyAnimateMateRequest over the element connection; whether the server keeps
+//   anything is not provable from the code, so it is a write (conservative).
+// Anything else (unknown operation/action, non-object args) is a write.
+const DISPLAY_READS = {inspect: null, capture: null,
+  camera: new Set(["read", "save", "restore", "standard", "orientation", "fit", "zoom", "normal_to", "section", "section_off",
+    "isolate", "exit_isolate", "make_transparent", "exit_make_transparent"]),
+  motion: new Set(["start", "stop", "step", "status", "restore"])};
+function displayMode(job) {
+  const op = typeof job.operation === "string" && Object.hasOwn(DISPLAY_READS, job.operation) ? job.operation : null;
+  if (!op) return "write";
+  const actions = DISPLAY_READS[op];
+  if (actions === null) return "read";
+  const act = plain(job.args) ? job.args.action : undefined;
+  return typeof act === "string" && actions.has(act) ? "read" : "write";
+}
 
 const tab = (did, wid, eid, mode) => ({did, type: "tab", wid, eid, mode});
 const branch = (did, wid, mode) => ({did, type: "branch", wid, mode});
@@ -83,14 +124,16 @@ const READ_POSTS = /^(?:featurescript|idtranslations|export(?:\/(?:gltf|obj|step
 const DOC_ROUTES = [
   // Overview: names, lists and history of the document; any grant on it is enough.
   ["GET", `documents/${H}`, d => [overview(d)]],
-  ["GET", `documents/d/${H}/[wvm]/[0-9a-f]{24}/(?:contents|elements|unitinfo|currentmicroversion|insertables|documenthistory)`, d => [overview(d)]],
+  ["GET", `documents/d/${H}/[wvm]/[0-9a-f]{24}/(?:contents|elements|unitinfo|currentmicroversion|documenthistory)`, d => [overview(d)]],
   ["GET", `documents/d/${H}/versions(?:/[0-9a-f]{24})?`, d => [overview(d)]],
   ["GET", `documents/d/${H}/workspaces`, d => [overview(d)]],
   ["GET", `documents/${H}/w/[0-9a-f]{24}/mergepreview`, d => [overview(d)]],
   ["GET", `appelements/d/${H}/[wvm]/[0-9a-f]{24}/resolvereferences`, d => [overview(d)]],
-  ["GET", `metadata/d/${H}/[wvm]/[0-9a-f]{24}/e`, d => [overview(d)]],
-  ["GET", `insertables/d/${H}/latest`, d => [overview(d)]],
   ["GET", `documents/d/${H}/externaldata/[0-9a-f]{24}`, d => [overview(d)]],
+  // Per-tab properties (descriptions, part numbers) and insertable parts/features/variables are tab content:
+  // a whole-branch read on that branch; on /v/ /m/ (and insertables/d/{did}/latest) no branch grant applies, so refused.
+  ["GET", `metadata/d/${H}/w/${H}/e`, (d, w) => [branch(d, w, "read")]],
+  ["GET", `documents/d/${H}/w/${H}/insertables`, (d, w) => [branch(d, w, "read")]],
   // Versioning: additive operations need their toggle; merge/restore also a whole-branch write and a one-shot approval.
   ["POST", `documents/d/${H}/versions`, d => [action(d, "versions")]],
   ["POST", `documents/d/${H}/workspaces`, d => [action(d, "branches")]],
@@ -162,8 +205,11 @@ const collect = found => (key, value) => {
   if (typeof value === "string" && !SAFE_ID_KEYS.has(key.toLowerCase()) && !isElementKey(key)) ids(value, found);
 };
 
-// Element references as tab read needs (any branch). `dids` is the document scope:
-// an object's documentId/documentIdSource/did, else the enclosing scope (the request's document).
+// Element references as tab read needs (any branch). `dids` is the enclosing document scope (the request's
+// document at the top). Which document an element id belongs to depends on the endpoint (BTDrawingParams pairs
+// documentId with an elementId of externalDocumentId), so an element id is checked against EVERY document in
+// scope: the object's generic documentId/documentIdSource/did, each "<prefix>DocumentId" and the enclosing scope.
+// Only a "<prefix>ElementId" whose own "<prefix>DocumentId" is present stays scoped to it.
 // A reference with no document in scope is refused. Depth is bounded by walk() beforehand.
 function references(value, dids, out) {
   const add = (did, eid) => {
@@ -188,15 +234,15 @@ function references(value, dids, out) {
     else if (key.endsWith("documentid")) { const p = key.slice(0, -"documentid".length); byPrefix.set(p, byPrefix.get(p) ?? new Set()); tokens(v, byPrefix.get(p)); }
   }
   const prefixed = [...byPrefix.values()].flatMap(s => [...s]);
-  // Nested values and namespaces: the generic document, else every document this object or its parent names.
-  const scope = docs.size ? [...docs] : [...new Set([...prefixed, ...dids])].filter(Boolean);
+  // Plain element ids, nested values and namespaces: every document this object or its parent names.
+  const scope = [...new Set([...docs, ...prefixed, ...dids])].filter(Boolean);
   if (!scope.length) scope.push(null);
   for (const [k, v] of entries) {
     text(k);
     if (isElementKey(k)) {
-      // "<prefix>ElementId(s)" belongs to "<prefix>DocumentId", else the generic document, else the enclosing one.
+      // "<prefix>ElementId(s)" belongs to its own "<prefix>DocumentId" when present, else to every document in scope.
       const own = byPrefix.get(k.toLowerCase().split("elementid")[0]);
-      const where = own?.size ? [...own] : docs.size ? [...docs] : dids.length ? dids : [null];
+      const where = own?.size ? [...own] : scope;
       // Strings, comma lists and arrays of them; nested objects get their own scope below.
       const eids = new Set();
       for (const s of [v].flat(Infinity)) if (typeof s === "string") ids(s, eids);
@@ -242,6 +288,15 @@ function storesInDocument(values) {
 
 const refused = (job, why) => new Error(`${why}: ${job.method} ${job.path.slice(0, 120)}.`);
 
+// A truthy withThumbnails / thumbnail* query flag at any depth (array items and objects count as on).
+const THUMBNAIL_FLAG = /^(?:withthumbnails|thumbnail)/i;
+const off = v => v == null || v === false || v === 0 || (typeof v === "string" && ["", "false", "0"].includes(v.trim().toLowerCase()));
+function thumbnailFlag(query) {
+  let on = false;
+  walk(query, (key, v) => { if (THUMBNAIL_FLAG.test(key) && !Array.isArray(v) && !off(v)) on = true; });
+  return on;
+}
+
 // Needs of an element path …/d/{did}/[{w|v|m}/{id}/]e/{eid}/{tail}.
 function elementNeeds(job, rest, values) {
   const m = rest.match(new RegExp(`^(?:[^/]+/)*?d/${H}/(?:([wvm])/${H}/)?e/${H}(?:/(.*))?$`));
@@ -272,9 +327,14 @@ function classifyTargeted(job) {
   const [d, w, e] = [did, wid, eid].map(id => id.toLowerCase());
   const command = job.command;
   if (job.kind === "native" && NATIVE_REFUSED.has(command)) throw new Error(`Native command ${String(command).slice(0, 80)} is refused: it changes the branch, versions or the document itself.`);
-  const mode = TARGETED[job.kind] ?? (NATIVE_READS.has(command) ? "read" : "write");
+  if (job.kind === "native" && typeof command === "string" && !NATIVE_KNOWN.has(command) && !NATIVE_TABS.has(command) &&
+      (NATIVE_DOCUMENT_LEVEL.test(command) || /^ui\.(?:document|collaboration)\./i.test(command)))
+    throw new Error(`Untested native command ${command.slice(0, 80)} is refused: it may act on versions, branches, sharing or the document itself.`);
+  const mode = job.kind === "display" ? displayMode(job) : TARGETED[job.kind] ?? (NATIVE_READS.has(command) ? "read" : "write");
   const needs = [tab(d, w, e, mode)];
   if (job.kind === "native" && NATIVE_TABS.has(command)) needs.push(action(d, "tabs"));
+  // Insertables list parts/features/variables of other tabs: whole-branch read, like the REST insertables route.
+  if (job.kind === "native" && command === "ui.document.GBTUiQueryInsertables") needs.push(branch(d, w, "read"));
   if (job.kind === "native") {
     const docs = new Set();
     walk(job.body, collect(docs));
@@ -366,6 +426,8 @@ export function classify(job) {
       if (route) {
         const [r, match] = route;
         needs = r.needs(...match.slice(1));
+        // An overview shows names, never content: thumbnails would render other tabs.
+        if (needs.every(n => n.type === "overview") && thumbnailFlag(job.query)) throw refused(job, "Thumbnails are tab content, refused on overview routes");
         critical = r.critical ?? undefined;
         requestDid = match[1];
         if (r.admin && !reason) reason = r.admin;
@@ -443,14 +505,17 @@ export function authorize(job, policy, approvals = {}, consumed = {}, now = Date
     const {did, type, wid, eid, mode} = need;
     if (type === "tab" && !atLeast(wid ? tabMode(p, did, wid, eid) : anyBranchMode(p, did, eid), mode))
       throw new AccessError(`No ${mode} access to tab ${eid} in ${wid ? `branch ${wid}` : "any branch"} of document ${did}. ${FILED}`, need);
+    // The worker files a request for every AccessError need except admin/merge actions (requests.js fileRequest);
+    // branch_write and overview cannot be approved from a banner, so those messages say what to grant instead.
     if (type === "branch" && !atLeast(branchMode(p, did, wid), mode))
-      throw new AccessError(`No ${mode} access to the whole branch ${wid} of document ${did}. Ask the user to grant it in the Onshape Native popup ("Whole document in this branch").`, need);
+      throw new AccessError(`No ${mode} access to the whole branch ${wid} of document ${did}. ${FILED}`, need);
     if (type === "branch_write" && !branchHasWrite(p, did, wid))
-      throw new AccessError(`No write access in branch ${wid} of document ${did}: creating a tab needs a write grant on a tab or the whole branch. Ask the user to grant it in the Onshape Native popup.`, need);
+      throw new AccessError(`No write access in branch ${wid} of document ${did}: creating a tab needs a write grant on a tab or the whole branch. Ask the user to grant write on a tab of that branch, or the whole branch, in the Onshape Native popup.`, need);
     if (type === "overview" && !hasAnyGrant(p, did)) throw new Error(`Document ${did} is not authorized. ${ASK}`);
     if (type === "action" && !actionOn(p, did, need.action)) {
       if (need.action === "admin") throw new AccessError(`Admin action (${reason}) on document ${did} refused. Ask the user to enable the "admin" document action for it in the Onshape Native popup.`, need);
-      throw new AccessError(`Document action "${need.action}" is off for ${did}. Ask the user to enable it in the popup (Document actions).`, need);
+      if (need.action === "merge") throw new AccessError(`Document action "merge" is off for ${did}. Ask the user to enable "Merge / restore" in the Onshape Native popup (Document actions).`, need);
+      throw new AccessError(`Document action "${need.action}" is off for ${did}. ${FILED}`, need);
     }
   }
   if (!critical) return {needs};

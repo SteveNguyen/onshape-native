@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {classify, authorize, applyPolicy, recordCreated, effectivePolicy, didFromUrl, targetFromUrl, docName, docLabel,
-  jobKey, AccessError, NATIVE_READS} from '../extension/policy.js';
+  jobKey, AccessError, NATIVE_READS, NATIVE_KNOWN} from '../extension/policy.js';
 
 const A = 'a'.repeat(24), B = 'b'.repeat(24), C = 'c'.repeat(24), W = 'e'.repeat(24), E = 'f'.repeat(24);
 const W2 = '1'.repeat(24), E2 = '2'.repeat(24), V = '3'.repeat(24);
@@ -169,8 +169,6 @@ test('rest without a path document id is refused except a small allowlist', () =
   allowed(rest('/api/v10/documents', 'POST', {body: {name: 'New'}}));
   allowed(rest(`/api/v6/translations/${C}`));
   allowed(rest('/api/v6/translations/translationformats'));
-  allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648'));
-  allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648/s/300x170'));
   // The comments collection is scoped by its document and element, which must be granted.
   allowed(rest('/api/v6/comments', 'GET', {query: {did: A, eid: E}}));
   allowed(rest('/api/v6/comments', 'POST', {body: {documentId: A, workspaceId: W, elementId: E, message: 'hi'}}));
@@ -188,7 +186,6 @@ test('reviewer regressions: legitimate document-scoped endpoints are allowed', (
   refused(rest(`/api/v6/thumbnails/document/${A}/version/${W}`), /not classified/);
   allowed(rest('/api/v6/comments', 'GET', {query: {documentId: A, eid: E}}));
   allowed(rest('/api/v6/translations/translationformats'));
-  allowed(rest('/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648'));
   // api_upload to a document-scoped multipart endpoint.
   allowed(rest(`/api/v6/blobelements/d/${A}/w/${W}`, 'POST', form([['encodedFilename', 'part.step']], [['file', 'solid']])));
   allowed({kind: 'tabs'});
@@ -511,10 +508,9 @@ test('catalog read-only POSTs that can store in the document are not reads when 
 test('document routes are classified', () => {
   const d = `/api/v6/documents`;
   for (const path of [`${d}/${A}`, `${d}/d/${A}/w/${W}/contents`, `${d}/d/${A}/v/${V}/elements`, `${d}/d/${A}/m/${V}/unitinfo`,
-    `${d}/d/${A}/w/${W}/currentmicroversion`, `${d}/d/${A}/v/${V}/insertables`, `${d}/d/${A}/w/${W}/documenthistory`,
+    `${d}/d/${A}/w/${W}/currentmicroversion`, `${d}/d/${A}/w/${W}/documenthistory`,
     `${d}/d/${A}/versions`, `${d}/d/${A}/versions/${V}`, `${d}/d/${A}/workspaces`, `${d}/${A}/w/${W}/mergePreview`,
-    `/api/v6/appelements/d/${A}/w/${W}/resolvereferences`, `/api/v6/metadata/d/${A}/v/${V}/e`, `/api/v6/insertables/d/${A}/latest`,
-    `${d}/d/${A}/externaldata/${C}`]) needs(rest(path), [overview(A)], path);
+    `/api/v6/appelements/d/${A}/w/${W}/resolvereferences`, `${d}/d/${A}/externaldata/${C}`]) needs(rest(path), [overview(A)], path);
   needs(rest(`${d}/d/${A}/versions`, 'POST', {body: {name: 'V1'}}), [overview(A), action(A, 'versions')]);
   needs(rest(`${d}/d/${A}/workspaces`, 'POST', {body: {name: 'b'}}), [overview(A), action(A, 'branches')]);
   const merge = classify(rest(`${d}/${A}/workspaces/${W}/merge`, 'POST', {body: {id: V, type: 'version'}}));
@@ -528,7 +524,7 @@ test('document routes are classified', () => {
     `/api/v6/blobelements/d/${A}/w/${W}`, `/api/v6/variables/d/${A}/w/${W}/variablestudio`, `/api/v6/drawings/d/${A}/w/${W}/create`,
     `/api/v6/translations/d/${A}/w/${W}`]) needs(rest(path, 'POST', {body: {}}), [branchWrite(A, W), action(A, 'tabs')], path);
   needs(rest(`/api/v6/elements/copyelement/${A}/workspace/${W}`, 'POST', {body: {documentIdSource: B, workspaceIdSource: W2, elementIdSource: E2}}),
-    [branchWrite(A, W), action(A, 'tabs'), tab(B, null, E2, 'read')]);
+    [branchWrite(A, W), action(A, 'tabs'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read')]);
   needs(rest(`${d}/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'x'}}), [branch(A, W, 'read')]);
   for (const [path, method] of [[`${d}/${A}`, 'POST'], [`${d}/${A}/notes`, 'POST'], [`${d}/d/${A}/w/${W}/moveelement`, 'POST'],
     [`${d}/${A}`, 'DELETE'], [`${d}/${A}/share`, 'POST']]) {
@@ -556,7 +552,8 @@ test('element ids hidden in bodies are needs', () => {
   const asm = `/api/v6/assemblies/d/${A}/w/${W}/e/${E}/instances`;
   // Assembly createInstance: the inserted tab is a read need in any branch.
   needs(rest(asm, 'POST', {body: {documentId: A, elementId: E2, versionId: V}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read')]);
-  needs(rest(asm, 'POST', {body: {documentId: B, elementId: E2}}), [tab(A, W, E, 'write'), tab(B, null, E2, 'read')]);
+  // An element id is checked against every document in scope: the object's own and the enclosing request document.
+  needs(rest(asm, 'POST', {body: {documentId: B, elementId: E2}}), [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read')]);
   // No documentId: the request's document. Keys are case-insensitive, lists and arrays are split.
   needs(rest(asm, 'POST', {body: {ElementID: E2}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read')]);
   needs(rest(asm, 'POST', {body: {elementIds: `${E2},${C}`}}), [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(A, null, C, 'read')]);
@@ -579,7 +576,7 @@ test('element ids hidden in bodies are needs', () => {
   // Native insert.
   const insert = {kind: 'native', target: {did: A, wid: W, eid: E}, command: 'ui.assembly.GBTUiAssemblyInsertOccurrence',
     body: {insertables: [{documentId: B, versionId: V, elementId: E2}, {namespace: `d${C}::v${V}::e${E2}`}]}};
-  needs(insert, [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(C, null, E2, 'read')]);
+  needs(insert, [tab(A, W, E, 'write'), tab(B, null, E2, 'read'), tab(A, null, E2, 'read'), tab(C, null, E2, 'read')]);
   // Without any document to scope it, an element reference is refused.
   assert.throws(() => classify(rest('/api/v6/comments', 'POST', {body: {elementId: E2, message: 'x'}})), /no document id/);
   // Authorization: a tab-only grant refuses a reference to another tab of the same document.
@@ -602,7 +599,7 @@ test('native commands map to modes', () => {
   hasNeed(native('ui.GBTUiAssemblyMirrorCreateDerivedElements'), action(A, 'tabs'));
   // An unknown or non-string command is a write.
   needs(native(undefined), [tab(A, W, E, 'write')]);
-  for (const kind of ['state', 'schema', 'open', 'display', 'ui_inspect']) needs({kind, target: {did: A, wid: W, eid: E}}, [tab(A, W, E, 'read')], kind);
+  for (const kind of ['state', 'schema', 'open', 'ui_inspect']) needs({kind, target: {did: A, wid: W, eid: E}}, [tab(A, W, E, 'read')], kind);
   needs({kind: 'ui_action', target: {did: A, wid: W, eid: E}}, [tab(A, W, E, 'write')]);
   needs({kind: 'tabs'}, []);
   // The extension's read list mirrors onshape_native/native_catalog.py READS (sync test in Task 6).
@@ -671,7 +668,7 @@ test('each action toggle', () => {
     [rest(`/api/v6/partstudios/d/${A}/w/${W}`, 'POST', {body: {}}), 'tabs'],
     [rest(`/api/v6/elements/d/${A}/w/${W}/e/${E}`, 'DELETE'), 'tabs'],
     [{kind: 'native', target: {did: A, wid: W, eid: E}, command: 'ui.document.GBTUiRenameElement', body: {}}, 'tabs']]) {
-    refused(job, new RegExp(`Document action "${name}" is off for ${A}\\. Ask the user to enable it in the popup`), grant({}));
+    refused(job, new RegExp(`Document action "${name}" is off for ${A}\\. An access request was filed`), grant({}));
     try { authorize(job, grant({})); } catch (error) { assert.deepEqual(error.need, action(A, name)); }
     allowed(job, grant({[name]: true}));
     // Another action's toggle does not help.
@@ -753,11 +750,12 @@ test('prefixed element ids are scoped by their prefixed document id', () => {
     refused(job, new RegExp(`tab ${T} in any branch of document ${B}`), p);
     allowed(job, withT);
   }
-  // Prefixed and plain pairs in one object each keep their own document.
+  // A prefixed pair keeps its own document; the plain element id is checked against every document of the object.
   const mixed = rest(`${app}/references`, 'POST', {body: {documentId: A, elementId: E2, targetDocumentId: B, targetElementId: T}});
-  needs(mixed, [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(B, null, T, 'read')]);
-  // Without its prefixed document, a prefixed element id falls back to documentId, then the request's document.
+  needs(mixed, [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(B, null, E2, 'read'), tab(B, null, T, 'read')]);
+  // Without its prefixed document, a prefixed element id is checked like a plain one.
   hasNeed(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), tab(B, null, T, 'read'));
+  hasNeed(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), tab(A, null, T, 'read'));
   hasNeed(rest(`${app}/references`, 'POST', {body: {targetElementId: T}}), tab(A, null, T, 'read'));
 });
 
@@ -856,4 +854,122 @@ test('merge/restore bodies: source branch, version source and override element i
   assert.throws(() => classify(rest(restore.path, 'POST', {body: {elementIdToStrategyOverride: {[C]: 'x', zz: 'y'}}})), /element id/);
   // Other ids in the body are still scanned as documents.
   refused(mk({id: W2, type: 'workspace', note: C}), /not authorized/, pol, {}, {}, 1000);
+});
+
+// ---- final review fixes ----
+
+test('element ids are scoped to every document the object names (BTDrawingParams)', () => {
+  const SECRET = '5'.repeat(24), WC = '6'.repeat(24);
+  // C is a Claude-created document ("*" write, tabs on); B has a single read grant on E.
+  const created = {docs: {[C]: {source: 'created', added: 1, branches: {'*': {all: 'write', tabs: {}}}, actions: {versions: true, branches: true, tabs: true, merge: true}}}};
+  const bTab = effectivePolicy({version: 2, docs: {[B]: {branches: {[W]: {tabs: {[E]: {mode: 'read'}}}}}}}, created);
+  const bSecret = effectivePolicy({version: 2, docs: {[B]: {branches: {[W]: {tabs: {[E]: {mode: 'read'}, [SECRET]: {mode: 'read'}}}}}}}, created);
+  const path = `/api/v10/drawings/d/${C}/w/${WC}/create`;
+  for (const body of [
+    {documentId: C, externalDocumentId: B, workspaceId: W, elementId: SECRET, drawingName: 'x'},
+    // Nested params object, and a nested object without document keys inheriting the union.
+    {params: {documentId: C, externalDocumentId: B, workspaceId: W, elementId: SECRET}},
+    {documentId: C, externalDocumentId: B, view: {elementId: SECRET}},
+    {documentId: C, externalDocumentId: B, view: {ref: `e${SECRET}`}},
+  ]) {
+    const job = rest(path, 'POST', {body});
+    hasNeed(job, tab(B, null, SECRET, 'read'));
+    refused(job, new RegExp(`tab ${SECRET} in any branch of document ${B}`), bTab);
+    allowed(job, bSecret);
+  }
+  // Only prefixed document keys: a bare element id needs read on each of them and on the enclosing document.
+  const T = '7'.repeat(24);
+  const app = rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {sourceDocumentId: B, elementId: T}});
+  hasNeed(app, tab(B, null, T, 'read'));
+  hasNeed(app, tab(A, null, T, 'read'));
+  // A prefixed element id with its own prefixed document stays scoped to it.
+  needs(rest(`/api/v10/appelements/d/${A}/w/${W}/e/${E}/references`, 'POST', {body: {documentId: A, targetDocumentId: B, targetElementId: T}}),
+    [tab(A, W, E, 'write'), tab(B, null, T, 'read')]);
+  // Version/microversion keys of the external document are still scanned as documents (fail closed).
+  refused(rest(path, 'POST', {body: {documentId: C, externalDocumentId: B, externalDocumentVersionId: V, elementId: SECRET}}), new RegExp(V), bSecret);
+});
+
+test('metadata listing and insertables need whole-branch read on /w/ and are refused on /v/ /m/', () => {
+  const lists = [`/api/v10/metadata/d/${A}/w/${W}/e`, `/api/v10/documents/d/${A}/w/${W}/insertables`];
+  const tabOnly = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}});
+  for (const path of lists) {
+    needs(rest(path), [branch(A, W, 'read')], path);
+    refused(rest(path), new RegExp(`No read access to the whole branch ${W}`), tabOnly);
+    allowed(rest(path), v2({[A]: {branches: {[W]: {all: 'read'}}}}));
+    refused(rest(path), /whole branch/, v2({[A]: {branches: {[W2]: {all: 'write'}}}}));
+  }
+  for (const path of [`/api/v10/metadata/d/${A}/v/${V}/e`, `/api/v10/metadata/d/${A}/m/${V}/e`,
+    `/api/v10/documents/d/${A}/v/${V}/insertables`, `/api/v10/documents/d/${A}/m/${V}/insertables`, `/api/v10/insertables/d/${A}/latest`])
+    refused(rest(path), /not classified/, policy());
+  // The native insertables query is the same listing.
+  const query = {kind: 'native', target: {did: A, wid: W, eid: E}, command: 'ui.document.GBTUiQueryInsertables', body: {}};
+  needs(query, [tab(A, W, E, 'read'), branch(A, W, 'read')]);
+  refused(query, /whole branch/, tabOnly);
+  allowed(query, v2({[A]: {branches: {[W]: {all: 'read'}}}}));
+});
+
+test('overview routes refuse content flags', () => {
+  const d = `/api/v10/documents`;
+  const tabOnly = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'read'}}}}}});
+  for (const path of [`${d}/${A}`, `${d}/d/${A}/w/${W}/contents`, `${d}/d/${A}/w/${W}/elements`, `${d}/d/${A}/v/${V}/elements`, `${d}/d/${A}/versions`]) {
+    for (const query of [{withThumbnails: true}, {withThumbnails: 'true'}, {thumbnail: 1}, {thumbnailSize: '300x300'}, {WithThumbnails: true}])
+      refused(rest(path, 'GET', {query}), /thumbnail/i, tabOnly);
+    allowed(rest(path, 'GET', {query: {withThumbnails: false}}), tabOnly);
+    allowed(rest(path), tabOnly);
+  }
+  // A whole-branch route may return thumbnails of that branch.
+  allowed(rest(`/api/v10/metadata/d/${A}/w/${W}/e`, 'GET', {query: {thumbnail: true}}), v2({[A]: {branches: {[W]: {all: 'read'}}}}));
+});
+
+test('content-hash thumbnails are refused', () => {
+  for (const path of ['/api/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648', '/api/v10/thumbnails/b2d11bdb54b4bdfb7ccf9a634e69232b80156648/s/300x170'])
+    refused(rest(path), /no document id/i, policy(true));
+});
+
+test('display mode by operation', () => {
+  const display = (operation, args = {}) => ({kind: 'display', target: {did: A, wid: W, eid: E}, operation, args});
+  const reads = [display('inspect'), display('capture', {max_size: 512}),
+    ...['read', 'save', 'restore', 'standard', 'orientation', 'fit', 'zoom', 'normal_to', 'section', 'section_off',
+      'isolate', 'exit_isolate', 'make_transparent', 'exit_make_transparent'].map(action => display('camera', {action})),
+    ...['start', 'stop', 'step', 'status', 'restore'].map(action => display('motion', {action}))];
+  // Visibility persists in the document; motion prepare sends a native solver RPC (conservatively a write).
+  const writes = [display('visibility', {changes: []}), display('motion', {action: 'prepare'}), display('camera', {action: 'bogus'}),
+    display('motion', {action: 'bogus'}), display('bogus'), display(undefined), display('camera'), {kind: 'display', target: {did: A, wid: W, eid: E}, operation: 'camera', args: 'x'}];
+  for (const job of reads) needs(job, [tab(A, W, E, 'read')], JSON.stringify(job.args) + job.operation);
+  for (const job of writes) needs(job, [tab(A, W, E, 'write')], JSON.stringify(job.args) + job.operation);
+  const read = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'read'}}}}}});
+  refused(display('visibility', {changes: []}), /No write access to tab/, read);
+  allowed(display('inspect'), read);
+});
+
+test('untested native commands cannot reach document-level operations', () => {
+  const native = command => ({kind: 'native', target: {did: A, wid: W, eid: E}, command, body: {}});
+  const p = v2({[A]: {branches: {[W]: {all: 'write'}}, actions: {tabs: true, versions: true, branches: true, merge: true, admin: true}}}, {allow_untested_native: true});
+  for (const c of ['ui.collaboration.GBTUiReleasePackageWorkflowMessage', 'ui.document.GBTUiSetDocumentThumbnailMessage', 'ui.GBTUiElementLockRequest',
+    'ui.GBTUiCreateVersionCall', 'ui.GBTUiMergeWorkspaces', 'ui.GBTUiRestoreElement', 'ui.GBTUiBranchFromHere', 'ui.GBTUiAddCommentCall',
+    'ui.GBTUiSharePublicLink', 'ui.GBTUiSetPermission', 'ui.GBTUiPublicationAdd', 'ui.GBTUiRevisionCreate', 'ui.document.GBTUiAnything', 'ui.collaboration.GBTUiAnything'])
+    refused(native(c), /refused/, p);
+  // Verified, read and tab commands keep working; untested modeling commands still pass to the page's own opt-in check.
+  for (const c of ['ui.GBTUiCommit', 'ui.document.GBTUiEditElementGroups', 'ui.document.GBTUiRenameElement', 'ui.document.GBTUiQueryInsertables',
+    'ui.GBTUiAddFeatureCall', 'ui.sketch.GBTUiSketchAddLineCall']) allowed(native(c), p);
+});
+
+test('known native commands mirror the page adapter allowlist', () => {
+  const text = fs.readFileSync(new URL('../extension/page-adapter.js', import.meta.url), 'utf8');
+  const block = text.slice(text.indexOf('const allowed = new Set(['), text.indexOf(']);', text.indexOf('const allowed = new Set([')));
+  const page = new Set([...block.matchAll(/"([\w.]+)"/g)].map(m => m[1]));
+  assert.ok(page.size >= 20);
+  assert.deepEqual([...NATIVE_KNOWN].sort(), [...new Set([...page, ...NATIVE_READS])].sort());
+});
+
+test('refusals say whether a request was filed or what to enable', () => {
+  const tabOnly = v2({[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}});
+  refused(rest(`/api/v10/documents/${A}/workspaces/${W}/copy`, 'POST', {body: {}}),
+    new RegExp(`No read access to the whole branch ${W} of document ${A}\\. An access request was filed`), tabOnly);
+  refused(rest(`/api/v10/documents/d/${A}/versions`, 'POST', {body: {}}),
+    new RegExp(`Document action "versions" is off for ${A}\\. An access request was filed`), tabOnly);
+  refused(rest(`/api/v10/documents/${A}/w/${W}/restore/v/${V}`, 'POST'),
+    /Document action "merge" is off.*enable "Merge \/ restore" in the Onshape Native popup/, v2({[A]: {branches: {[W]: {all: 'write'}}}}));
+  refused(rest(`/api/v10/partstudios/d/${A}/w/${W}`, 'POST', {body: {}}),
+    /No write access in branch.*Ask the user to grant write on a tab of that branch, or the whole branch, in the Onshape Native popup/, v2({[A]: {branches: {[W]: {all: 'read'}}, actions: {tabs: true}}}));
 });
