@@ -116,8 +116,22 @@ Assemblies:
   feature IDs. Flip a mate with `primaryAxisAlignment` (`flipPrimary` is a mate
   connector parameter). Check feature specs (`featurespecs`) instead of guessing
   parameter IDs, then verify the solved pose with a render or capture.
+- Face deterministic IDs change when the source Part Studio is edited: read them
+  fresh (`evaluate` topology on the source Part Studio) before creating connectors.
+- Feature, instance and node IDs may contain `/` or `+`: URL-encode them in paths
+  (e.g. `.../featureid/Mf0q%2FU`).
+- `display_state`, `set_visibility` and `mate_animation` work on assemblies only.
+  For a Part Studio `view_control`, take `tab_id` from `resolve_target` and the
+  microversion from `getCurrentMicroversion`.
 - Page `display_state` with its returned `snapshot`; without it each page re-reads
   the editor.
+
+Materials: read the part's current `Material` metadata before changing it. The
+REST metadata API can set a material but cannot remove one, so a restore means
+writing the previous value back; if the part had none, the user clears it in
+Onshape.
+
+Branches: never propose or run a merge or restore; the user merges in Onshape.
 
 Refresh after writes. Check feature regeneration, exact dimensions/volume/body
 count, or assembly occurrence transforms/mates as appropriate. Weight requires
