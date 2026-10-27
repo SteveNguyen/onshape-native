@@ -156,23 +156,39 @@ test("approve never writes a '*' key and bounds names", () => {
 
 test("one-shot approval is bound to the exact job and consumed", () => {
   const granted = pol({[D]: doc({[W]: {all: "write", tabs: {}}}, {merge: true})});
-  const job = {kind: "rest", method: "POST", path: `/api/v6/documents/${D}/workspaces/${W}/merge`, body: {workspaceId: W2}};
+  const job = {kind: "rest", method: "POST", path: `/api/v6/documents/${D}/workspaces/${W}/merge`, body: {id: W2, type: "version"}};
   let need;
   try { authorize(job, granted, {}, [], 1000); assert.fail("must need approval"); } catch (e) { assert.ok(e instanceof AccessError); need = e.need; }
   assert.equal(need.type, "approval");
   const filed = Object.values(fileRequest({}, need, 1000, describeJob(job)))[0];
   const approvals = approveOnce({}, filed.need.key, 1000);
   assert.equal(approvals[need.key], 1000 + 300_000);
-  assert.ok(authorize(job, granted, approvals, [], 2000).approvalKey);                 // passes once
-  assert.throws(() => authorize(job, granted, approvals, [need.key], 2000), AccessError);  // consumed
-  assert.throws(() => authorize({...job, body: {workspaceId: E}}, granted, approvals, [], 2000), AccessError);  // other body
-  assert.throws(() => authorize(job, granted, approvals, [], 1000 + 300_000), AccessError);  // expired
+  assert.ok(authorize(job, granted, approvals, {}, 2000).approvalKey);                 // passes once
+  assert.throws(() => authorize(job, granted, approvals, {[need.key]: approvals[need.key]}, 2000), AccessError);  // consumed
+  // used once -> refused -> approve again -> allowed once more (fresh expiry differs from the consumed one)
+  const used = {[need.key]: approvals[need.key]};
+  const again = approveOnce(approvals, need.key, 1500);
+  assert.notEqual(again[need.key], approvals[need.key]);
+  assert.ok(authorize(job, granted, again, used, 2000).approvalKey);
+  assert.throws(() => authorize(job, granted, again, {[need.key]: again[need.key]}, 2000), AccessError);
+  assert.throws(() => authorize(job, granted, approvals, [need.key], 2000), AccessError);  // consumed must be a map
+  assert.throws(() => authorize({...job, body: {id: E, type: "version"}}, granted, approvals, {}, 2000), AccessError);  // other body
+  assert.throws(() => authorize(job, granted, approvals, {}, 1000 + 300_000), AccessError);  // expired
 });
 
-test("pruneApprovals drops expired approvals and keeps consumed only while its approval lives", () => {
+test("pruneApprovals drops expired approvals and stale consumed entries", () => {
   const approvals = {k1: 500, k2: 5000, k3: 6000};
-  const r = pruneApprovals(approvals, ["k1", "k2", "gone"], 1000);
+  const r = pruneApprovals(approvals, {k1: 500, k2: 5000, k3: 5999, gone: 7000}, 1000);
   assert.deepEqual(r.approvals, {k2: 5000, k3: 6000});
-  assert.deepEqual(r.consumed, ["k2"]);
-  assert.deepEqual(pruneApprovals(undefined, undefined, 1), {approvals: {}, consumed: []});
+  assert.deepEqual(r.consumed, {k2: 5000});
+  assert.deepEqual(pruneApprovals(undefined, undefined, 1), {approvals: {}, consumed: {}});
+});
+
+test("approveOnce never reuses an expiry and approve tolerates non-string ids", () => {
+  assert.equal(approveOnce({k: 1000 + 300_000 + 50}, "k", 1000).k, 1000 + 300_000 + 51);
+  const p0 = pol({[D]: doc({[W]: {tabs: {}}})});
+  for (const need of [tabNeed({did: 5}), tabNeed({eid: {}}), tabNeed({wid: 7}), tabNeed({did: [D]})]) {
+    const r = approve(p0, {id: "x", need}, {did: D, wid: W});
+    assert.deepEqual([r.ok, r.reason, r.policy], [false, "Malformed request.", p0]);
+  }
 });

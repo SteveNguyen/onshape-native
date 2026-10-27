@@ -301,6 +301,33 @@ function finish(needs) {
   return [...seen.values()].sort((a, b) => rank[a.type] - rank[b.type]);
 }
 
+// Merge body {id, type, defaultMergeStrategy, mergeStrategyElementOverrides}, restore body
+// {defaultRestoreStrategy, elementIdToStrategyOverride}. The merge source is a branch (read need) or a version
+// (overview only); override keys are element ids (tab reads). Returns the needs and the body left to scan.
+const OVERRIDES = {merge: "mergestrategyelementoverrides", restore: "elementidtostrategyoverride"};
+function criticalBody(job, did, critical) {
+  const body = job.body ?? {};
+  if (!plain(body)) throw refused(job, "Merge/restore body must be a JSON object");
+  const needs = [], rest = {};
+  for (const [k, v] of Object.entries(body)) {
+    const key = k.toLowerCase();
+    if (critical === "merge" && (key === "id" || key === "type")) continue;
+    if (key !== OVERRIDES[critical]) { rest[k] = v; continue; }
+    if (!plain(v)) throw refused(job, "Strategy overrides must be an object keyed by element id");
+    for (const eid of Object.keys(v)) {
+      if (!HEX.test(eid)) throw refused(job, "Strategy override key is not an element id");
+      needs.push(tab(did, null, eid.toLowerCase(), "read"));
+    }
+    rest[k] = Object.values(v);
+  }
+  if (critical === "merge") {
+    const type = typeof body.type === "string" ? body.type.toLowerCase() : null;
+    if (type === "workspace" && typeof body.id === "string" && HEX.test(body.id)) needs.push(branch(did, body.id.toLowerCase(), "read"));
+    else if (!(type === "version" && typeof body.id === "string" && HEX.test(body.id))) throw refused(job, "Merge source must be a workspace or version id");
+  }
+  return {needs, body: rest};
+}
+
 export function classify(job) {
   if (job?.kind === "tabs") return {needs: [], admin: false};
   if (Object.hasOwn(TARGETED, job?.kind ?? "")) return classifyTargeted(job);
@@ -342,6 +369,14 @@ export function classify(job) {
         critical = r.critical ?? undefined;
         requestDid = match[1];
         if (r.admin && !reason) reason = r.admin;
+        if (critical && job.body_base64 == null) {
+          // Source branch and override element ids are references, not documents: rescan the rest of the body.
+          const c = criticalBody(job, requestDid, critical);
+          needs.push(...c.needs);
+          values[1] = c.body;
+          docs.clear();
+          for (const value of values) walk(value, visit);
+        }
       } else if (!elements && (rest.split("/").some(s => ADMIN_SEGMENTS.has(s)) || (job.method === "DELETE" && /^documents\/(?:d\/)?[0-9a-f]{24}$/.test(rest)))) {
         needs = [];  // admin-only routes: the admin action on every named document, below
       } else throw refused(job, "API route not classified, refused by default");
@@ -397,7 +432,7 @@ function effective(policy) {
 
 const atLeast = (mode, need) => mode === "write" || (mode === "read" && need === "read");
 
-export function authorize(job, policy, approvals = {}, consumed = [], now = Date.now()) {
+export function authorize(job, policy, approvals = {}, consumed = {}, now = Date.now()) {
   const p = effective(policy);
   // Page controls are model text the worker cannot classify; off unless the user opts in.
   if ((job?.kind === "ui_inspect" || job?.kind === "ui_action") && p.allow_ui_fallback !== true)
@@ -419,10 +454,10 @@ export function authorize(job, policy, approvals = {}, consumed = [], now = Date
     }
   }
   if (!critical) return {needs};
-  // Merge/restore overwrite work: one popup approval per exact request, used once, before it expires.
+  // Merge/restore overwrite work: one popup approval per exact request, used once (consumed[key] === the approval it used), before it expires.
   const key = jobKey(job);
   const expires = plain(approvals) && Object.hasOwn(approvals, key) ? approvals[key] : undefined;
-  if (!(typeof expires === "number" && expires > now) || !Array.isArray(consumed) || consumed.includes(key)) {
+  if (!(typeof expires === "number" && expires > now) || !plain(consumed) || consumed[key] === expires) {
     const did = needs.find(n => n.type === "branch").did;
     throw new AccessError(`The ${critical} needs a one-time approval: ask the user to approve this exact ${critical} in the Onshape Native popup, then retry the same request.`,
       {did, type: "approval", critical, key});
@@ -431,7 +466,7 @@ export function authorize(job, policy, approvals = {}, consumed = [], now = Date
 }
 
 // Returns the job the extension executes: trust fields come only from policy.
-export function applyPolicy(job, policy, approvals = {}, consumed = [], now = Date.now()) {
+export function applyPolicy(job, policy, approvals = {}, consumed = {}, now = Date.now()) {
   const {needs} = authorize(job, policy, approvals, consumed, now);
   const p = effective(policy);
   const dids = [...new Set(needs.map(n => n.did))];

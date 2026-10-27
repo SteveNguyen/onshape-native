@@ -120,7 +120,7 @@ export function branchHasWrite(policy, did, wid) {
 }
 
 // Same bound as docName in policy.js (not imported: policy.js imports this file). Display-only.
-const bound = t => typeof t === "string" ? t.trim().slice(0, 120) : "";
+export const bound = t => typeof t === "string" ? t.trim().slice(0, 120) : "";
 
 // Grants `mode` on one tab of one branch (popup-side, pure). Creates the doc entry (all actions off),
 // never downgrades an existing tab mode, and sets optional display names {doc, branch, tab}.
@@ -134,7 +134,7 @@ export function grantTab(policy, did, wid, eid, mode, names = {}) {
   return p;
 }
 
-export const hasAnyGrant =(policy, did) =>
+export const hasAnyGrant = (policy, did) =>
   Object.values(branchesOf(policy, did)).some(b => b.all || Object.keys(b.tabs ?? {}).length > 0);
 
 export const actionOn = (policy, did, action) => policy.docs?.[did?.toLowerCase()]?.actions?.[action] === true;

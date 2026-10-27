@@ -1,7 +1,7 @@
 // Access requests and one-shot approvals. Pure: the worker files requests (it owns "requests"),
 // only the popup turns one into a grant or approval, and only by exactly the requested need.
 // A request is data from a refused agent call: approve() re-validates it and never trusts more than the need.
-import {ACTIONS, checkPolicy, grantTab, hasAnyGrant} from "./grants.js";
+import {ACTIONS, bound, checkPolicy, grantTab, hasAnyGrant} from "./grants.js";
 
 const HEX = /^[0-9a-f]{24}$/i;
 const MODES = ["read", "write"];
@@ -11,7 +11,6 @@ const APPROVABLE_ACTIONS = new Set(["versions", "branches", "tabs"]);
 const OPEN_FIRST = "Open this document first, then approve.";
 const plain = v => v !== null && typeof v === "object" && !Array.isArray(v);
 const newEntry = () => ({actions: Object.fromEntries(ACTIONS.map(a => [a, false])), branches: {}});
-const bound = t => typeof t === "string" ? t.trim().slice(0, 120) : "";
 
 // Sorted-key JSON: the same need always has the same id.
 const stable = v => plain(v) ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v ?? null);
@@ -43,6 +42,7 @@ export function approve(policy, request, ctx) {
   const no = reason => ({policy, ok: false, reason});
   const need = request?.need;
   if (!plain(need) || !HEX.test(need.did ?? "")) return no("Malformed request.");
+  if (typeof need.did !== "string" || [need.wid, need.eid].some(v => v != null && typeof v !== "string")) return no("Malformed request.");
   const did = need.did.toLowerCase();
   const here = typeof ctx?.did === "string" && ctx.did.toLowerCase() === did;
   // No blind cross-document approvals: a document with no grant at all is approved only while it is open.
@@ -87,11 +87,15 @@ export function approve(policy, request, ctx) {
 }
 
 // One popup approval for one exact job key; the worker consumes it on first use.
-export const approveOnce = (approvals, key, now) => ({...(plain(approvals) ? approvals : {}), [key]: now + APPROVAL_TTL});
+// The expiry always differs from a consumed approval's (consumed[key] === the approval it used), so approving again works.
+export const approveOnce = (approvals, key, now) => {
+  const old = plain(approvals) && typeof approvals[key] === "number" ? approvals[key] : 0;
+  return {...(plain(approvals) ? approvals : {}), [key]: Math.max(now + APPROVAL_TTL, old + 1)};
+};
 
-// Drops expired approvals. `consumed` keeps only keys whose approval is still unexpired (they are what
-// blocks reuse; once the approval is gone the key is moot). Returns {approvals, consumed}.
+// Drops expired approvals, and consumed entries with no live approval or for an older approval of the key.
+// `consumed` is {jobKey: expiry of the approval it consumed}. Returns {approvals, consumed}.
 export function pruneApprovals(approvals, consumed, now) {
   const kept = Object.fromEntries(Object.entries(plain(approvals) ? approvals : {}).filter(([, exp]) => typeof exp === "number" && exp > now));
-  return {approvals: kept, consumed: (Array.isArray(consumed) ? consumed : []).filter(k => Object.hasOwn(kept, k))};
+  return {approvals: kept, consumed: Object.fromEntries(Object.entries(plain(consumed) ? consumed : {}).filter(([k, exp]) => kept[k] === exp))};
 }

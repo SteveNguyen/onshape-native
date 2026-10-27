@@ -517,9 +517,9 @@ test('document routes are classified', () => {
     `${d}/d/${A}/externaldata/${C}`]) needs(rest(path), [overview(A)], path);
   needs(rest(`${d}/d/${A}/versions`, 'POST', {body: {name: 'V1'}}), [overview(A), action(A, 'versions')]);
   needs(rest(`${d}/d/${A}/workspaces`, 'POST', {body: {name: 'b'}}), [overview(A), action(A, 'branches')]);
-  const merge = classify(rest(`${d}/${A}/workspaces/${W}/merge`, 'POST', {body: {}}));
+  const merge = classify(rest(`${d}/${A}/workspaces/${W}/merge`, 'POST', {body: {id: V, type: 'version'}}));
   assert.equal(merge.critical, 'merge');
-  needs(rest(`${d}/${A}/workspaces/${W}/merge`, 'POST', {body: {}}), [action(A, 'merge'), branch(A, W, 'write')]);
+  needs(rest(`${d}/${A}/workspaces/${W}/merge`, 'POST', {body: {id: V, type: 'version'}}), [action(A, 'merge'), branch(A, W, 'write')]);
   for (const vm of ['v', 'm']) {
     assert.equal(classify(rest(`${d}/${A}/w/${W}/restore/${vm}/${V}`, 'POST')).critical, 'restore');
     needs(rest(`${d}/${A}/w/${W}/restore/${vm}/${V}`, 'POST'), [action(A, 'merge'), branch(A, W, 'write')]);
@@ -762,17 +762,17 @@ test('prefixed element ids are scoped by their prefixed document id', () => {
 });
 
 test('merge needs toggle, whole-branch write and approval', () => {
-  const merge = rest(`/api/v6/documents/${A}/workspaces/${W}/merge`, 'POST', {body: {workspaceId: W2}});
+  const merge = rest(`/api/v6/documents/${A}/workspaces/${W}/merge`, 'POST', {body: {id: V, type: 'version'}});
   const key = jobKey(merge);
   const ok = {[key]: 2000};
   const p = (actions, branches = {[W]: {all: 'write'}}) => v2({[A]: {branches, actions}});
-  refused(merge, /"merge" is off/, p({}), ok, [], 1000);
-  refused(merge, /whole branch/, p({merge: true}, {[W]: {tabs: {[E]: {mode: 'write'}}}}), ok, [], 1000);
-  refused(merge, /whole branch/, p({merge: true}, {[W]: {all: 'read'}}), ok, [], 1000);
-  refused(merge, /whole branch/, p({merge: true}, {[W2]: {all: 'write'}}), ok, [], 1000);
+  refused(merge, /"merge" is off/, p({}), ok, {}, 1000);
+  refused(merge, /whole branch/, p({merge: true}, {[W]: {tabs: {[E]: {mode: 'write'}}}}), ok, {}, 1000);
+  refused(merge, /whole branch/, p({merge: true}, {[W]: {all: 'read'}}), ok, {}, 1000);
+  refused(merge, /whole branch/, p({merge: true}, {[W2]: {all: 'write'}}), ok, {}, 1000);
   // Approval: missing, expired, consumed, or for another body.
-  for (const [approvals, consumed, now] of [[{}, [], 1000], [ok, [], 2000], [ok, [key], 1000],
-    [{[jobKey({...merge, body: {workspaceId: W}})]: 2000}, [], 1000], [ok, 'not-a-list', 1000]]) {
+  for (const [approvals, consumed, now] of [[{}, {}, 1000], [ok, {}, 2000], [ok, {[key]: 2000}, 1000],
+    [{[jobKey({...merge, body: {id: W2, type: 'version'}})]: 2000}, {}, 1000], [ok, [key], 1000], [ok, 'x', 1000]]) {
     try { authorize(merge, p({merge: true}), approvals, consumed, now); assert.fail('not refused'); }
     catch (error) {
       assert.ok(error instanceof AccessError, error.message);
@@ -780,16 +780,16 @@ test('merge needs toggle, whole-branch write and approval', () => {
       assert.match(error.message, /approv/);
     }
   }
-  assert.deepEqual(authorize(merge, p({merge: true}), ok, [], 1000).approvalKey, key);
-  assert.equal(applyPolicy(merge, p({merge: true}), ok, [], 1000).method, 'POST');
+  assert.deepEqual(authorize(merge, p({merge: true}), ok, {}, 1000).approvalKey, key);
+  assert.equal(applyPolicy(merge, p({merge: true}), ok, {}, 1000).method, 'POST');
   // Restore is critical the same way.
   const restore = rest(`/api/v6/documents/${A}/w/${W}/restore/v/${V}`, 'POST');
-  refused(restore, /approv/, p({merge: true}), {}, [], 1000);
-  allowed(restore, p({merge: true}), {[jobKey(restore)]: 2000}, [], 1000);
+  refused(restore, /approv/, p({merge: true}), {}, {}, 1000);
+  allowed(restore, p({merge: true}), {[jobKey(restore)]: 2000}, {}, 1000);
   // Non-critical jobs have no approval key.
   assert.equal(authorize(rest(`/api/v6/documents/d/${A}/versions`, 'POST', {body: {}}), p({versions: true})).approvalKey, undefined);
   // Raw bodies cannot be bound to an approval.
-  assert.throws(() => classify({...merge, body: null, ...form([['workspaceId', W2]])}), /raw/i);
+  assert.throws(() => classify({...merge, body: null, ...form([['id', W2]])}), /raw/i);
 });
 
 test('jobKey is stable JSON of method, path, query and body', () => {
@@ -825,4 +825,35 @@ test('admin unchanged: the admin document action', () => {
   // Admin without any grant on the document is still refused.
   refused(share, /not authorized/, v2({[A]: {actions: {admin: true}}}));
   assert.equal(applyPolicy({kind: 'state', target: {did: A, wid: W, eid: E}}, v2({[A]: {branches: {[W]: {all: 'read'}}, actions: {admin: true}}})).admin_allowed, true);
+});
+
+const W3 = '4'.repeat(24);
+test('merge/restore bodies: source branch, version source and override element ids are references', () => {
+  const p = (branches, actions = {merge: true}) => v2({[A]: {branches, actions}});
+  const url = `/api/v6/documents/${A}/workspaces/${W}/merge`;
+  const mk = body => rest(url, 'POST', {body});
+  const appr = job => ({[jobKey(job)]: 2000});
+  const pol = p({[W]: {all: 'write'}, [W2]: {all: 'read'}});
+  const job = mk({id: W2, type: 'Workspace', defaultMergeStrategy: 'OVERWRITE', mergeStrategyElementOverrides: {[E]: 'KEEP'}});
+  assert.ok(authorize(job, pol, appr(job), {}, 1000).approvalKey);
+  // Source branch not readable, or not a workspace/version at all.
+  const noSource = p({[W]: {all: 'write'}});
+  refused(mk({id: W2, type: 'workspace'}), /whole branch/, noSource, appr(mk({id: W2, type: 'workspace'})), {}, 1000);
+  for (const body of [{id: W2, type: 'microversion'}, {id: W2}, {type: 'workspace'}, {id: 'zz', type: 'workspace'}, {id: W2, type: 'workspace', mergeStrategyElementOverrides: {nope: 'x'}}])
+    assert.throws(() => classify(mk(body)), /refused|source|override/i, JSON.stringify(body));
+  // A version source needs no source-branch grant.
+  const ver = mk({id: V, type: 'version'});
+  assert.ok(authorize(ver, noSource, appr(ver), {}, 1000).approvalKey);
+  // Override keys are tab reads on the request's document (any branch). They are always covered by the
+  // whole-branch write merge/restore already require, so they cannot add a refusal; they must just not be read as documents.
+  const bad = mk({id: W2, type: 'workspace', mergeStrategyElementOverrides: {[E2]: 'KEEP'}});
+  hasNeed(bad, tab(A, null, E2, 'read'));
+  hasNeed(bad, branch(A, W2, 'read'));
+  assert.ok(authorize(bad, pol, appr(bad), {}, 1000).approvalKey);
+  const restore = rest(`/api/v6/documents/${A}/w/${W}/restore/v/${V}`, 'POST', {body: {defaultRestoreStrategy: 'KEEP', elementIdToStrategyOverride: {[E2]: 'OVERWRITE'}}});
+  hasNeed(restore, tab(A, null, E2, 'read'));
+  assert.ok(authorize(restore, pol, appr(restore), {}, 1000).approvalKey);
+  assert.throws(() => classify(rest(restore.path, 'POST', {body: {elementIdToStrategyOverride: {[C]: 'x', zz: 'y'}}})), /element id/);
+  // Other ids in the body are still scanned as documents.
+  refused(mk({id: W2, type: 'workspace', note: C}), /not authorized/, pol, {}, {}, 1000);
 });
