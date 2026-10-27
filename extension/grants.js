@@ -12,7 +12,8 @@ const max = (a, b) => a === "write" || b === "write" ? "write" : a ?? b ?? null;
 const optName = n => n === undefined || typeof n === "string";
 
 // Validates one doc entry and returns a normalized copy (lower-cased ids, all actions present).
-function checkEntry(entry, what) {
+// `star` allows the "*" all-branches key, which only worker-created documents may carry.
+function checkEntry(entry, what, star = false) {
   if (!plain(entry) || !optName(entry.name) || !plain(entry.branches ?? {}) || !plain(entry.actions ?? {})) throw malformed(what);
   const actions = {};
   for (const a of ACTIONS) {
@@ -22,7 +23,7 @@ function checkEntry(entry, what) {
   }
   const branches = {};
   for (const [wid, b] of Object.entries(entry.branches ?? {})) {
-    if (!(wid === "*" || HEX.test(wid)) || !plain(b) || !optName(b.name) || !plain(b.tabs ?? {}) ||
+    if (!((star && wid === "*") || HEX.test(wid)) || !plain(b) || !optName(b.name) || !plain(b.tabs ?? {}) ||
         (b.all !== undefined && !MODES.includes(b.all))) throw malformed(what);
     const tabs = {};
     for (const [eid, t] of Object.entries(b.tabs ?? {})) {
@@ -34,12 +35,12 @@ function checkEntry(entry, what) {
   return {...entry, actions, branches};
 }
 
-function checkDocs(docs, what) {
+function checkDocs(docs, what, star = false) {
   if (!plain(docs)) throw malformed(what);
   const out = {};
   for (const [did, entry] of Object.entries(docs)) {
     if (!HEX.test(did)) throw malformed(what);
-    out[did.toLowerCase()] = checkEntry(entry, what);
+    out[did.toLowerCase()] = checkEntry(entry, what, star);
   }
   return out;
 }
@@ -49,7 +50,9 @@ export function checkPolicy(policy) {
   if (policy === undefined) return empty();
   if (plain(policy) && policy.version !== 2) return {...empty(), stale: true};
   if (!plain(policy)) throw malformed("document");
-  return {...policy, docs: checkDocs(policy.docs, "document")};
+  for (const k of ["allow_untested_native", "allow_ui_fallback"]) if (policy[k] !== undefined && typeof policy[k] !== "boolean") throw malformed("document");
+  return {...policy, allow_untested_native: policy.allow_untested_native === true, allow_ui_fallback: policy.allow_ui_fallback === true,
+          docs: checkDocs(policy.docs, "document")};
 }
 
 // Adds the grants of `from` into `into` (both normalized branch maps): tabs and `all` take the max mode.
@@ -70,12 +73,22 @@ export function effectivePolicy(policy, created = {}) {
   const base = checkPolicy(policy);
   if (!plain(created)) throw malformed("created-document");
   const docs = {...base.docs};
-  // Worker-created docs the popup has no entry for.
-  for (const [did, entry] of Object.entries(created.docs === undefined ? {} : checkDocs(created.docs, "created-document"))) docs[did] ??= entry;
-  for (const [did, g] of Object.entries(created.grants === undefined ? {} : checkDocs(created.grants, "created-document"))) {
+  // Worker-created docs the popup has no entry for; never admin.
+  const made = created.docs === undefined ? {} : checkDocs(created.docs, "created-document", true);
+  for (const [did, entry] of Object.entries(made)) {
+    if (entry.actions.admin) throw malformed("created-document");
+    docs[did] ??= entry;
+  }
+  // Grants contribute branches/tabs only (never actions, never "*") and only to known documents.
+  if (created.grants !== undefined && !plain(created.grants)) throw malformed("created-document");
+  for (const [did, g] of Object.entries(created.grants ?? {})) {
+    if (!plain(g)) throw malformed("created-document");
+    const {branches} = checkDocs({[did]: {branches: g.branches}}, "created-document")[did.toLowerCase()];
+    const id = did.toLowerCase();
+    if (!docs[id]) continue;
     // Copy so the caller's policy is never mutated.
-    docs[did] = {...(docs[did] ?? g), branches: structuredClone(docs[did]?.branches ?? {})};
-    unionBranches(docs[did].branches, g.branches);
+    docs[id] = {...docs[id], branches: structuredClone(docs[id].branches)};
+    unionBranches(docs[id].branches, branches);
   }
   return {...base, docs};
 }

@@ -51,7 +51,8 @@ test("tabMode: tab grant, other tab/branch denied", () => {
 });
 
 test("tabMode: branch-wide all and '*' wildcard cover any tab", () => {
-  const p = pol({[D]: doc({[W]: {all: "read", tabs: {}}, "*": {all: "write", tabs: {}}})});
+  // "*" only exists on worker-created docs
+  const p = effectivePolicy(undefined, {docs: {[D]: {source: "created", added: 1, actions: {}, branches: {[W]: {all: "read", tabs: {}}, "*": {all: "write", tabs: {}}}}}});
   assert.equal(tabMode(p, D, W, E), "write");  // "*" beats the branch's read
   assert.equal(tabMode(p, D, W2, E2), "write");
   const q = pol({[D]: doc({[W]: {all: "read", tabs: {}}})});
@@ -124,4 +125,44 @@ test("effectivePolicy: old flat v1 created map is ignored", () => {
 test("effectivePolicy: malformed created throws", () => {
   assert.throws(() => effectivePolicy(undefined, {docs: {nothex: {}}}), /malformed.*popup/);
   assert.throws(() => effectivePolicy(undefined, "x"), /malformed.*popup/);
+});
+
+test("effectivePolicy: created grants on an unknown doc are ignored", () => {
+  const p = effectivePolicy(undefined, {docs: {}, grants: {[D]: {branches: {[W]: {tabs: {[E]: {mode: "write"}}}}}}});
+  assert.equal(hasAnyGrant(p, D), false);
+  assert.deepEqual(p.docs, {});
+});
+
+test("effectivePolicy: created grants never copy actions", () => {
+  const base = pol({[D]: doc({})});
+  const p = effectivePolicy(base, {docs: {}, grants: {[D]: {actions: {admin: true, merge: true}, branches: {[W]: {tabs: {[E]: {mode: "read"}}}}}}});
+  assert.equal(actionOn(p, D, "admin"), false);
+  assert.equal(actionOn(p, D, "merge"), false);
+  assert.equal(tabMode(p, D, W, E), "read");
+});
+
+test("effectivePolicy: created grants may add `all` on a concrete branch", () => {
+  const p = effectivePolicy(pol({[D]: doc({})}), {grants: {[D]: {branches: {[W]: {all: "write", tabs: {}}}}}});
+  assert.equal(branchMode(p, D, W), "write");
+});
+
+test('"*" is only accepted in created.docs', () => {
+  const star = {"*": {all: "write", tabs: {}}};
+  assert.throws(() => checkPolicy(pol({[D]: doc(star)})), /malformed.*popup/);
+  assert.throws(() => effectivePolicy(pol({[D]: doc({})}), {grants: {[D]: {branches: star}}}), /malformed.*popup/);
+  const p = effectivePolicy(undefined, {docs: {[D]: {source: "created", added: 1, actions: {}, branches: star}}});
+  assert.equal(tabMode(p, D, W, E), "write");
+});
+
+test("created docs may not carry admin", () => {
+  assert.throws(() => effectivePolicy(undefined, {docs: {[D]: {source: "created", added: 1, actions: {admin: true}, branches: {}}}}), /malformed.*popup/);
+});
+
+test("checkPolicy: flags must be boolean, default false", () => {
+  assert.throws(() => checkPolicy({version: 2, docs: {}, allow_ui_fallback: "false"}), /malformed.*popup/);
+  assert.throws(() => checkPolicy({version: 2, docs: {}, allow_untested_native: 1}), /malformed.*popup/);
+  const p = checkPolicy({version: 2, docs: {}});
+  assert.equal(p.allow_ui_fallback, false);
+  assert.equal(p.allow_untested_native, false);
+  assert.equal(checkPolicy({version: 2, docs: {}, allow_ui_fallback: true}).allow_ui_fallback, true);
 });
