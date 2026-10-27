@@ -22,7 +22,7 @@
 - Names (tabs, branches, documents) are display-only, bounded with `docName`, rendered with `textContent`, never grant access.
 - Manifest version `0.6.0`; worker advertises `policy_v2` (and no longer `policy_v1`).
 - Work on a new local branch `security/tab-scoping` from `security/document-scoping`. **Do not commit or push unless the user asks**; the "Checkpoint" steps below only run the suite.
-- Bash conformance (user rule): no `cd`, redirections, heredocs or pipes; absolute paths. JS tests: `node --test /home/steve/Project/Repo/divers/onshape-native/tests/`; Python: `uv run --project /home/steve/Project/Repo/divers/onshape-native pytest -q /home/steve/Project/Repo/divers/onshape-native/tests`.
+- Bash conformance (user rule): no `cd`, redirections, heredocs or pipes; absolute paths. JS tests: `node --test <repo>/tests/`; Python: `uv run --project <repo> pytest -q <repo>/tests`.
 
 ## Review Focus
 
@@ -61,7 +61,7 @@
   `"*"` (all branches) is only ever set by `created` documents.
 
 - [ ] **Step 1: Write failing tests** in `tests/grants.test.mjs`: `checkPolicy` (undefined, v1 object → `stale: true` and no docs, malformed branch/tab/mode → throws); `tabMode` (tab grant, `all` grant, `"*"`, other branch → null, other tab → null, write beats read); `anyBranchMode`; `effectivePolicy` (created doc added; created grant on a popup doc adds a tab without changing its `actions`; v1 flat `created` ignored).
-- [ ] **Step 2: Run** `node --test /home/steve/Project/Repo/divers/onshape-native/tests/grants.test.mjs` → FAIL (module missing).
+- [ ] **Step 2: Run** `node --test <repo>/tests/grants.test.mjs` → FAIL (module missing).
 - [ ] **Step 3: Implement `extension/grants.js`** with the signatures above; ids lower-cased; validation rejects any mode other than `"read"`/`"write"`, non-hex keys (except `"*"`), non-boolean actions.
 - [ ] **Step 4: Run** the same command → PASS.
 
@@ -103,7 +103,7 @@ Rules (from the spec "Classification", plus the catalog scan of `data/openapi.js
 - [ ] **Step 1: Rewrite test helpers** in `tests/policy.test.mjs`: `policy(admin)` now builds a v2 document grant `{branches: {"*": {all: "write", tabs: {}}}, actions: {admin, versions:false, …}}` so every existing security case keeps its meaning; run once → existing cases FAIL (old API).
 - [ ] **Step 2: Add failing classification tests**: `element paths map to tab needs` (GET/POST on `/w/`, `/v/`, `/m/`), `read-only POSTs are reads` (each `READ_POSTS` route; translation with `storeInDocument: true` → tabs action), `document routes are classified` (one assertion per `DOC_ROUTES` row), `unlisted document routes are refused` (a made-up `POST documents/d/{A}/w/{W}/frobnicate`), `element ids hidden in bodies are needs` (assembly `createInstance` body `{documentId: A, elementId: E2}`, derived feature `namespace`, `copyelement` source, native insert), `native commands map to modes` (one READS command → read, one write → write, `GBTUiEditElementGroups` → tabs action, `GBTUiUpgradeWorkspaceCall` → refused).
 - [ ] **Step 3: Implement** in `extension/policy.js`; keep `segments`, `ids`, `walk`, `formFields`, canonical-path checks unchanged.
-- [ ] **Step 4: Run** `node --test /home/steve/Project/Repo/divers/onshape-native/tests/policy.test.mjs` → PASS.
+- [ ] **Step 4: Run** `node --test <repo>/tests/policy.test.mjs` → PASS.
 
 ### Task 3: Authorization against grants
 
@@ -121,7 +121,7 @@ Rules (from the spec "Classification", plus the catalog scan of `data/openapi.js
 - Error texts: tab → `No ${mode} access to tab ${eid} in branch ${wid} of document ${did}. An access request was filed: ask the user to approve it in the Onshape Native popup.`; action → `Document action "${action}" is off for ${did}. Ask the user to enable it in the popup (Document actions).` (no request filed for `admin`/`merge`, see Task 5).
 
 - [ ] **Step 1: Failing tests**: `tab grant read vs write`, `branch isolation` (write grant on W; write via W2 refused; `/v/` read of the same tab allowed; `/w/W2` GET refused), `history reads need a grant on any branch`, `overview needs any grant`, `each action toggle` (versions, branches, tabs on/off), `merge needs toggle, whole-branch write and approval`, `catalog versioning endpoints refused by default` (reads `data/openapi.json`; every non-GET operation whose path contains `versions`, `workspaces`, `merge`, `restore` or `revert`, ids substituted, is refused under a whole-branch write grant with all actions off), `admin unchanged`, `UI fallback and untested native toggles unchanged`.
-- [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** `node --test /home/steve/Project/Repo/divers/onshape-native/tests/policy.test.mjs` → PASS.
+- [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** `node --test <repo>/tests/policy.test.mjs` → PASS.
 
 ### Task 4: Auto-grants after create/copy/branch/tab creation
 
@@ -149,7 +149,7 @@ Rules (from the spec "Classification", plus the catalog scan of `data/openapi.js
 - `approve(policy, request, ctxNames) -> policy` (used by popup): tab need → `setTab`-equivalent grant (`wid: null` needs are approved on the branch the user is viewing; if the popup is not on that document, returns policy unchanged and the popup shows "open this document first"); action need → toggle on (`versions`, `branches`, `tabs` only).
 - `approveOnce(approvals, key, now) -> approvals` (`expires = now + 300_000`); `pruneApprovals(approvals, consumed, now)`.
 - [ ] **Step 1: Failing tests**: `dedupe`, `cap 20`, `expiry 1h`, `admin and merge actions are not filed`, `approve grants exactly the need`, `approve refuses when the popup context is another document`, `one-shot approval is bound to the exact job and consumed` (with Task 3 `authorize`: approved key passes once; same key in `consumed` refused; different body refused; expired refused).
-- [ ] **Step 2: Run** `node --test /home/steve/Project/Repo/divers/onshape-native/tests/requests.test.mjs` → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS.
+- [ ] **Step 2: Run** `node --test <repo>/tests/requests.test.mjs` → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS.
 
 ### Task 6: Worker, tab context and bridge wiring
 
