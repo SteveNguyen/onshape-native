@@ -206,6 +206,19 @@ async def test_timeout_is_not_replayed_and_late_result_cannot_resolve_next_comma
     assert await task == {"tabs": []}
 
 
+async def test_policy_v1_only_extension_is_refused():
+    broker = Broker(CONFIG)
+    class Connection:
+        sent = []
+        async def send_json(self, data):
+            self.sent.append(data)
+    broker.extension = Connection()
+    broker.extension_info = {"version": "0.5.0", "capabilities": ["tab_context_v1", "display_v1", "policy_v1"]}
+    with pytest.raises(BridgeError, match="Extension policy is outdated; reload the Onshape Native extension \\(needs policy_v2\\)\\."):
+        await broker.dispatch({"kind": "state", "target": TARGET})
+    assert not broker.extension.sent
+
+
 async def test_extension_without_policy_v2_only_lists_tabs():
     broker = Broker(CONFIG)
     class Connection:

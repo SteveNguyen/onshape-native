@@ -69,17 +69,16 @@ async function execute(job) {
     if (error instanceof AccessError) await fileAccessRequest(original, error);
     throw error;
   }
+  // Consume the one-shot approval BEFORE running: a failed write means no run, and any retry needs a new approval.
+  // The expiry comes from the snapshot authorize used, so a re-approval made mid-run is not wasted.
+  if (approvalKey) {
+    const latest = await stored();
+    const kept = pruneApprovals(latest.approvals, latest.consumed, Date.now()).consumed;
+    await chrome.storage.local.set({consumed: {...kept, [approvalKey]: approvals[approvalKey]}});
+  }
   const result = await run(job, current);
   // The worker writes only "created", "requests", "consumed", never the popup's "policy"/"approvals".
   // Re-read so a concurrent popup change is kept; commands are already serialized by inFlight.
-  if (approvalKey) {
-    const latest = await stored();
-    const used = latest.approvals?.[approvalKey];
-    if (typeof used === "number") {
-      const kept = pruneApprovals(latest.approvals, latest.consumed, Date.now()).consumed;
-      await chrome.storage.local.set({consumed: {...kept, [approvalKey]: used}});
-    }
-  }
   if (job.kind === "rest" && job.method !== "GET") {
     const latest = await stored();
     const updated = recordCreated(job, result, latest.policy, latest.created);
