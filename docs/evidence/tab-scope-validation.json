@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-27",
+  "extension_version": "0.6.0",
+  "account": "free Onshape account, public test document",
+  "document": "test_claudeA 978625c5cbcf7259225315cb, workspace cdc846fb3a6cf924c62b4632",
+  "grant": "popup preset 'This tab only' on Part Studio 'test_claudeA' 2867afbb2f7099bf8722fc30",
+  "checks": [
+    {"check": "read granted Part Studio features", "expected": "allowed", "result": "allowed"},
+    {"check": "tab names (documents elements listing, overview)", "expected": "allowed", "result": "allowed"},
+    {"check": "add a variable feature then delete it on the granted tab", "expected": "allowed", "result": "allowed (featureStatus OK, deleted, features back to Import 1)"},
+    {"check": "read Part Studio 1 28aaef7058b273ff7766858f", "expected": "refused + request", "result": "refused + request"},
+    {"check": "read Assembly 1 4451388a774fd494f7eee7c2", "expected": "refused + request", "result": "refused + request"},
+    {"check": "write on Assembly 1", "expected": "refused", "result": "refused"},
+    {"check": "element metadata listing", "expected": "refused (needs whole-branch read)", "result": "refused"},
+    {"check": "granted Part Studio on another branch", "expected": "refused", "result": "refused"},
+    {"check": "create version with versions off", "expected": "refused", "result": "refused"},
+    {"check": "merge with merge off", "expected": "refused", "result": "refused"},
+    {"check": "share", "expected": "refused (admin)", "result": "refused"},
+    {"check": "make public", "expected": "refused (admin)", "result": "refused"},
+    {"check": "rename the Import feature (references the STEP blob tab, not granted)", "expected": "refused", "result": "refused: needs read on the blob tab"},
+    {"check": "after popup Allow on 'read Assembly 1': read Assembly 1", "expected": "allowed", "result": "allowed"},
+    {"check": "after Allow: write on Assembly 1", "expected": "refused (read only allowed)", "result": "refused"},
+    {"check": "after Deny: read Part Studio 1", "expected": "refused", "result": "refused"},
+    {"check": "create version after enabling Create versions", "expected": "allowed", "result": "allowed (version 'tabscope test' created)"},
+    {"check": "merge still off", "expected": "refused", "result": "refused"}
+  ],
+  "popup": "reviewed by the user: looks good",
+  "not_covered": ["merge/restore one-shot approval end to end", "real second branch (a non-granted workspace id was used)", "Pollen account"]
+}
