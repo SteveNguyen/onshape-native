@@ -207,12 +207,23 @@ async function loadListings() {
     ctx.tabs = tabsFromContents(contents); branches = branchNames(workspaces); ctx.branchName = branches[ctx.wid] ?? "";
   } catch { listingError = true; }
 }
-const [active] = await chrome.tabs.query({active: true, currentWindow: true, url: "https://cad.onshape.com/*"});
-const did = didFromUrl(active?.url)?.toLowerCase(), target = targetFromUrl(active?.url), grantable = target?.wvm === "w";
-if (did) ctx = {did, wvm: target?.wvm ?? null, wid: grantable ? target.wvmid.toLowerCase() : "", eid: grantable ? (target.eid ?? "").toLowerCase() : "", docName: docName(active.title), branchName: "", tabs: []};
+// Context follows the active tab: the side panel stays open across tab and URL changes.
+async function setContext() {
+  const [active] = await chrome.tabs.query({active: true, currentWindow: true, url: "https://cad.onshape.com/*"});
+  const did = didFromUrl(active?.url)?.toLowerCase(), target = targetFromUrl(active?.url), grantable = target?.wvm === "w";
+  ctx = did ? {did, wvm: target?.wvm ?? null, wid: grantable ? target.wvmid.toLowerCase() : "", eid: grantable ? (target.eid ?? "").toLowerCase() : "", docName: docName(active.title), branchName: "", tabs: []} : null;
+  branches = {}; listingError = false;
+  await render();
+  $("custom").open = presetOf((await load()).eff, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
+  loadListings().then(render);
+}
 chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && (changes.policy || changes.created || changes.requests || changes.approvals)) render(); });
-await render();
-$("custom").open = presetOf((await load()).eff, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
-loadListings().then(render);
+const windowId = (await chrome.windows.getCurrent()).id;
+chrome.tabs.onActivated.addListener(info => { if (info.windowId === windowId) setContext(); });
+chrome.tabs.onUpdated.addListener((id, change, tab) => { if (tab.active && tab.windowId === windowId && change.url) setContext(); });
+// sidePanel.open needs the click's user gesture, so it is called without awaiting first.
+$("panel").onclick = () => chrome.sidePanel.open({windowId}).then(() => window.close(), () => {});
+$("panel").hidden = !chrome.extension.getViews({type: "popup"}).includes(window);  // already in the side panel
+await setContext();
 await refresh();
 setInterval(refresh, 1000);

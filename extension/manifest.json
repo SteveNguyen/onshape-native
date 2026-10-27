@@ -10,7 +10,8 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "scripting", "alarms", "webRequest"],
+  "permissions": ["storage", "scripting", "alarms", "webRequest", "sidePanel"],
+  "side_panel": {"default_path": "popup.html"},
   "host_permissions": ["https://cad.onshape.com/*", "http://127.0.0.1:8766/*"],
   "background": {"service_worker": "worker.js", "type": "module"},
   "action": {
