@@ -1,8 +1,10 @@
-import {didFromUrl, docName, docLabel} from "./policy.js";
+import {didFromUrl, docName, docLabel, targetFromUrl} from "./policy.js";
+import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, effectivePolicy, presetOf, revokeDocument, setAction, setTab, summary, tabMode} from "./grants.js";
+import {approve, approveOnce, liveRequests} from "./requests.js";
+import {branchNames, tabsFromContents} from "./listings.js";
 
-const status = document.getElementById("status"), dot = document.getElementById("dot"), toggle = document.getElementById("toggle");
-const current = document.getElementById("current"), list = document.getElementById("docs"), untested = document.getElementById("untested");
-const uiFallback = document.getElementById("uifallback");
+const $ = id => document.getElementById(id);
+const status = $("status"), dot = $("dot"), toggle = $("toggle");
 async function refresh() {
   const {enabled} = await chrome.storage.local.get("enabled");
   const {connected} = await chrome.runtime.sendMessage({type: "status"});
@@ -14,49 +16,165 @@ toggle.onclick = async () => {
   await chrome.storage.local.set({enabled: !enabled});
   await chrome.runtime.sendMessage({type: enabled ? "disconnect" : "connect"}); await refresh();
 };
-
-// Only this popup writes "policy"; the worker writes only "created" (documents the
-// agent created). Page scripts cannot reach chrome.storage.
-async function getState() {
-  const {policy, created} = await chrome.storage.local.get(["policy", "created"]);
-  const plain = v => v !== null && typeof v === "object" && !Array.isArray(v);
-  return {policy: plain(policy?.docs) ? policy : {docs: {}, allow_untested_native: false, allow_ui_fallback: false},  // reset malformed
-          created: plain(created) ? created : {}};
-}
-async function update(change) { const state = await getState(); change(state.policy, state.created); await chrome.storage.local.set(state); }
-// A revoke must also clear the worker's entry, or the merged policy would keep it.
-const revoke = id => update((p, c) => { delete p.docs[id]; delete c[id]; });
 const el = (tag, props = {}, ...children) => { const node = Object.assign(document.createElement(tag), props); node.append(...children); return node; };
+// All model/Onshape text goes through textContent (el props or text children), never innerHTML.
 
-// Model text (tab titles) is rendered with textContent only.
-async function render() {
-  const {policy, created} = await getState();
-  const docs = {...created, ...policy.docs};
-  const [tab] = await chrome.tabs.query({active: true, currentWindow: true, url: "https://cad.onshape.com/*"});
-  const did = didFromUrl(tab?.url);
-  if (did) {
-    const authorized = Object.hasOwn(docs, did);
-    const button = el("button", {textContent: authorized ? "Revoke" : "Authorize this document",
-      onclick: () => authorized ? revoke(did) : update(p => {
-        const name = docName(tab.title);
-        p.docs[did] = {admin: false, source: "user", added: Date.now(), ...(name ? {name} : {})};
-      })});
-    current.className = "";
-    current.replaceChildren(el("div", {className: "title", textContent: tab.title || "Untitled"}), el("div", {className: "id", textContent: did}), button);
-  }
-  list.replaceChildren(...Object.entries(docs).map(([id, entry]) => el("li", {},
-    el("div", {className: "row"}, el("span", {className: "id grow", textContent: docLabel(id, entry) + (entry.source === "created" ? " (created)" : "")}),
-      el("button", {textContent: "Revoke", onclick: () => revoke(id)})),
-    el("label", {}, el("input", {type: "checkbox", checked: entry.admin === true,
-      onchange: event => update((p, c) => { const e = p.docs[id] ?? c[id]; if (e) p.docs[id] = {...e, admin: event.target.checked}; })}),
-      "Allow admin actions (share, public, webhooks, delete)"))));
-  if (!list.children.length) list.append(el("li", {className: "muted", textContent: "None. The agent can only list tabs."}));
-  untested.checked = policy.allow_untested_native === true;
-  uiFallback.checked = policy.allow_ui_fallback === true;
+// This popup writes only "policy" and "approvals"; the worker writes "created", "requests", "consumed".
+// ctx: the active Onshape tab {did, wvm, wid, eid, docName, branchName, tabs}; wid/eid are "" off a /w/ URL. Names come only from our own listings.
+let ctx = null, branches = {}, listingError = false;
+const reasons = new Map();  // request id -> why Allow was refused
+const TYPES = {PARTSTUDIO: "Part Studio", ASSEMBLY: "Assembly", DRAWING: "Drawing", BLOB: "File", FEATURESTUDIO: "Feature Studio", VARIABLESTUDIO: "Variables"};
+const tabLabel = t => `${t.name || t.eid}${t.type ? ` (${TYPES[t.type] ?? t.type})` : ""}`;
+const openTab = () => ctx?.tabs.find(t => t.eid === ctx.eid);
+
+async function load() {
+  const s = await chrome.storage.local.get(["policy", "created", "requests", "approvals"]);
+  let stored, eff;
+  try { stored = checkPolicy(s.policy); } catch { stored = {...checkPolicy(undefined), stale: true, malformed: true}; }
+  try { eff = effectivePolicy(s.policy, s.created ?? undefined); } catch { eff = stored.malformed ? checkPolicy(undefined) : stored; }
+  // A v1 or malformed policy is replaced by a fresh empty v2 on the first change (base undefined), never on open.
+  return {...s, stored, eff, stale: stored.stale === true, base: stored.stale ? undefined : s.policy};
 }
-untested.onchange = () => update(p => { p.allow_untested_native = untested.checked; });
-uiFallback.onchange = () => update(p => { p.allow_ui_fallback = uiFallback.checked; });
-chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && (changes.policy || changes.created)) render(); });
+async function change(fn) {
+  const s = await load(); const policy = fn(s.base); delete policy.stale;
+  await chrome.storage.local.set({policy});
+}
+const resolve = id => chrome.runtime.sendMessage({type: "resolve_request", id});
+
+// ---- banners ----
+function describe(need) {
+  const here = need.did?.toLowerCase() === ctx?.did, mode = String(need.mode ?? "").toUpperCase();
+  const tab = here && ctx.tabs.find(t => t.eid === need.eid?.toLowerCase());
+  const wid = need.wid?.toLowerCase();
+  const branch = need.wid ? (here && (wid === ctx.wid ? ctx.branchName : branches[wid])) || need.wid : "any branch";
+  const where = here ? "" : ` of document ${need.did}`;
+  switch (need.type) {
+    case "tab": return `${mode} ${tab ? `"${tabLabel(tab)}"` : `tab ${need.eid}`} in ${branch}${where}`;
+    case "branch": return `${mode} the whole branch ${branch}${where}`;
+    case "branch_write": return `WRITE in branch ${branch}${where} (create a tab)`;
+    case "action": return `enable document action "${need.action}"${where}`;
+    case "overview": return `list the tabs of document ${need.did}`;
+    default: return `${need.type}${where}`;
+  }
+}
+function banner(s, r) {
+  const need = r.need ?? {}, node = el("div", {className: "banner"});
+  const deny = el("button", {textContent: "Deny", onclick: () => resolve(r.id)});
+  if (need.type === "approval") {
+    // Merge/restore: a one-time approval of this exact request, only while the document's merge action is on.
+    const live = s.approvals?.[need.key] > Date.now(), ready = actionOn(s.eff, need.did, "merge");
+    node.append(el("div", {textContent: `Claude asks to ${need.critical} (once): ${r.method ?? ""} ${r.path_summary ?? ""} in document ${need.did}`}),
+      el("div", {className: "muted small", textContent: "Can overwrite others' work. Approval is used once, for this exact request."}));
+    if (!ready) node.append(el("div", {className: "warn small", textContent: "Turn on Merge / restore in Document actions first."}));
+    node.append(el("div", {className: "row"}, el("button", {textContent: live ? "Approved" : "Approve once", disabled: !ready || live,
+      onclick: async () => { const {approvals} = await chrome.storage.local.get("approvals"); await chrome.storage.local.set({approvals: approveOnce(approvals, need.key, Date.now())}); }}), deny));
+    return node;
+  }
+  node.append(el("div", {textContent: `Claude asks to ${describe(need)}`}));
+  if (reasons.has(r.id)) node.append(el("div", {className: "warn small", textContent: reasons.get(r.id)}));
+  node.append(el("div", {className: "row"}, el("button", {textContent: "Allow", onclick: async () => {
+    const {base} = await load();
+    const names = {doc: ctx?.docName, branch: ctx?.branchName, tab: openTab()?.name};
+    const res = approve(base, r, {did: ctx?.did, wid: ctx?.wid, eid: ctx?.eid, names});
+    if (!res.ok) { reasons.set(r.id, res.reason); return render(); }
+    delete res.policy.stale;
+    await chrome.storage.local.set({policy: res.policy});  // grant first, then drop the request
+    await resolve(r.id);
+  }}), deny));
+  return node;
+}
+
+// ---- sections ----
+function renderContext(s) {
+  const cur = $("current"), notes = [];
+  if (!ctx) return;
+  cur.className = "";
+  const branch = ctx.wvm === "w" ? (ctx.branchName || ctx.wid) : "";
+  cur.replaceChildren(el("div", {className: "title", textContent: ctx.docName || "Untitled"}), el("div", {className: "id", textContent: ctx.did}),
+    ...(branch ? [el("div", {className: "title", textContent: `Branch: ${branch}`})] : []),
+    ...(ctx.eid ? [el("div", {className: "title", textContent: `Open tab: ${openTab() ? tabLabel(openTab()) : ctx.eid}`})] : []));
+  if (ctx.wvm !== "w" && ctx.wvm) notes.push("Grants apply to branches; open a branch to grant access.");
+  else if (ctx.wvm === "w" && !ctx.eid) notes.push("Open a tab to use presets.");
+  if (listingError) notes.push("Could not load tab names");
+  cur.append(...notes.map(n => el("div", {className: "warn small", textContent: n})));
+}
+function renderPresets(s) {
+  const sec = $("presets"); sec.hidden = !(ctx?.wvm === "w" && ctx.eid);
+  if (sec.hidden) return;
+  const now = presetOf(s.base, ctx);
+  const labels = {tab: `This tab only: read + write ${openTab()?.name || ctx.eid}`, tab_read_rest: "This tab, read the rest of the document (this branch)",
+    branch: "Whole document in this branch", custom: "Custom…"};
+  sec.replaceChildren(...[...PRESETS, "custom"].map(p => el("label", {}, el("input", {type: "radio", name: "preset", checked: now === p,
+    onchange: () => p === "custom" ? ($("custom").open = true) : change(base => applyPreset(base, ctx, p))}), labels[p])));
+}
+function treeRow(s, t) {
+  const mode = tabMode(s.eff, ctx.did, ctx.wid, t.eid), whole = branchMode(s.eff, ctx.did, ctx.wid);
+  const box = (label, on, locked, set) => el("label", {className: "cb", title: locked ? "Granted by the whole-branch grant" : ""},
+    el("input", {type: "checkbox", checked: on, disabled: locked, onchange: e => change(base => setTab(base, ctx, t.eid, set(e.target.checked)))}), label);
+  // Write ticks Read; unticking Read clears the tab.
+  return el("div", {className: "row trow" + (t.eid === ctx.eid ? " open" : "")}, el("span", {className: "grow title", textContent: tabLabel(t)}),
+    box("R", !!mode, !!whole, on => on ? "read" : null), box("W", mode === "write", whole === "write", on => on ? "write" : "read"));
+}
+function renderTree(s) {
+  const sec = $("custom"); sec.hidden = ctx?.wvm !== "w";
+  if (sec.hidden) return;
+  // Granted tabs missing from the listing (deleted, or the listing failed) stay visible so they can be cleared.
+  const tabs = [...ctx.tabs], known = new Set(tabs.map(t => t.eid));
+  const granted = s.stored.docs[ctx.did]?.branches[ctx.wid]?.tabs ?? {};
+  for (const eid of [...Object.keys(granted), ...(ctx.eid ? [ctx.eid] : [])]) if (!known.has(eid)) { known.add(eid); tabs.push({eid, name: bound(granted[eid]?.name), type: ""}); }
+  const folders = new Map();
+  for (const t of tabs) folders.set(t.folder ?? "", [...(folders.get(t.folder ?? "") ?? []), t]);
+  $("customBody").replaceChildren(...[...folders].flatMap(([folder, rows]) =>
+    [...(folder ? [el("div", {className: "folder", textContent: folder})] : []), ...rows.map(t => treeRow(s, t))]));
+}
+const WARNINGS = {merge: "can overwrite others' work, each run also needs your one-time approval", admin: "share, permissions, public, delete"};
+const ACTION_LABELS = {versions: "Create versions", branches: "Create branches", merge: "Merge / restore", tabs: "Create, rename, delete tabs", admin: "Admin"};
+function renderActions(s) {
+  const sec = $("actions"); sec.hidden = !ctx;
+  if (sec.hidden) return;
+  $("actionsBody").replaceChildren(...ACTIONS.map(a => el("div", {}, el("label", {}, el("input", {type: "checkbox", checked: actionOn(s.eff, ctx.did, a),
+    onchange: e => change(base => setAction(base, ctx.did, a, e.target.checked))}), ACTION_LABELS[a]),
+    ...(WARNINGS[a] ? [el("div", {className: "warn small", textContent: WARNINGS[a]})] : []))));
+}
+function renderAll(s) {
+  const items = Object.entries(s.eff.docs).map(([id, entry]) => el("li", {className: "row"},
+    el("span", {className: "id grow", textContent: docLabel(id, entry) + (entry.source === "created" ? " (created)" : "")}),
+    ...(Object.hasOwn(s.stored.docs, id) ? [el("button", {textContent: "Revoke", onclick: () => change(base => revokeDocument(base, id))})] : [])));
+  $("docs").replaceChildren(...(items.length ? items : [el("li", {className: "muted", textContent: "None. The agent can only list tabs."})]));
+}
+async function render() {
+  const s = await load();
+  $("notice").hidden = !s.stale;
+  $("notice").textContent = s.stored.malformed ? "Stored access policy is malformed, re-authorize." : "Access model changed, re-authorize.";
+  const live = liveRequests(s.requests, Date.now());
+  for (const id of reasons.keys()) if (!live.some(r => r.id === id)) reasons.delete(id);
+  $("banners").replaceChildren(...live.map(r => banner(s, r)));
+  renderContext(s); renderPresets(s); renderTree(s); renderActions(s); renderAll(s);
+  // Summary comes from the effective stored grants (created "*" grants included), never from the selected preset.
+  $("summarySection").hidden = !ctx;
+  if (ctx) $("summary").textContent = summary(s.eff, ctx);
+  $("untested").checked = s.eff.allow_untested_native === true;
+  $("uifallback").checked = s.eff.allow_ui_fallback === true;
+}
+for (const [id, key] of [["untested", "allow_untested_native"], ["uifallback", "allow_ui_fallback"]])
+  $(id).onchange = () => change(base => ({...structuredClone(checkPolicy(base)), [key]: $(id).checked}));
+
+// Listings are user-initiated popup reads (not agent jobs, not policy-checked); only for /w/ URLs.
+async function loadListings() {
+  if (ctx?.wvm !== "w") return;
+  const get = path => fetch(`https://cad.onshape.com/api/v10/documents/d/${ctx.did}/${path}`, {credentials: "include", headers: {Accept: "application/json"}})
+    .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+  try {
+    const [contents, workspaces] = await Promise.all([get(`w/${ctx.wid}/contents`), get("workspaces")]);
+    ctx.tabs = tabsFromContents(contents); branches = branchNames(workspaces); ctx.branchName = branches[ctx.wid] ?? "";
+  } catch { listingError = true; }
+}
+const [active] = await chrome.tabs.query({active: true, currentWindow: true, url: "https://cad.onshape.com/*"});
+const did = didFromUrl(active?.url)?.toLowerCase(), target = targetFromUrl(active?.url), grantable = target?.wvm === "w";
+if (did) ctx = {did, wvm: target?.wvm ?? null, wid: grantable ? target.wvmid.toLowerCase() : "", eid: grantable ? (target.eid ?? "").toLowerCase() : "", docName: docName(active.title), branchName: "", tabs: []};
+chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && (changes.policy || changes.created || changes.requests || changes.approvals)) render(); });
 await render();
+$("custom").open = presetOf((await load()).base, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
+loadListings().then(render);
 await refresh();
 setInterval(refresh, 1000);
