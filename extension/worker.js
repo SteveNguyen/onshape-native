@@ -3,8 +3,8 @@ import {restGet} from "./rest-get.js";
 import {tabContext} from "./tab-context.js";
 import {displayCommand} from "./display-adapter.js";
 import {BRIDGE_TOKEN} from "./local-config.js";
-import {AccessError, authorize, applyPolicy, effectivePolicy, recordCreated} from "./policy.js";
-import {badgeFor, describeJob, fileRequest, pruneApprovals} from "./requests.js";
+import {badgeFor} from "./requests.js";
+import {execute as executePipeline, fromPopup, popupStorageMessage} from "./execute.js";
 import {bridgeSession} from "./handshake.js";
 
 let socket = null;
@@ -31,8 +31,6 @@ async function resolveTab(job) {
   return selected;
 }
 
-async function stored() { return chrome.storage.local.get(["policy", "created", "requests", "approvals", "consumed"]); }
-
 const connected = () => !!socket && verified === socket && socket.readyState === WebSocket.OPEN;
 
 // Live request count (orange) wins over ON/OFF; the popup's Allow/Deny changes "requests" in storage.
@@ -43,49 +41,9 @@ async function refreshBadge() {
   chrome.action.setBadgeBackgroundColor({color: badge.color ?? "#4b5563"});
 }
 
-// A refused agent call becomes a popup request for exactly the missing need. Never masks the refusal.
-async function fileAccessRequest(job, error) {
-  try {
-    const now = Date.now();
-    const {requests} = await chrome.storage.local.get("requests");
-    const need = error.need;
-    await chrome.storage.local.set({requests: fileRequest(requests, need, now, need?.type === "approval" ? describeJob(job) : undefined)});
-    await refreshBadge();
-  } catch { /* the bridge still gets the original error */ }
-}
-
-async function execute(job) {
-  // The popup-managed policy is authoritative; bridge-supplied trust fields are overwritten.
-  const {policy, created, approvals: rawApprovals, consumed: rawConsumed} = await stored();
-  const current = effectivePolicy(policy, created);
-  const now = Date.now();
-  const {approvals, consumed} = pruneApprovals(rawApprovals, rawConsumed, now);
-  const original = job;
-  let approvalKey;
-  try {
-    ({approvalKey} = authorize(job, current, approvals, consumed, now));
-    job = applyPolicy(job, current, approvals, consumed, now);
-  } catch (error) {
-    if (error instanceof AccessError) await fileAccessRequest(original, error);
-    throw error;
-  }
-  // Consume the one-shot approval BEFORE running: a failed write means no run, and any retry needs a new approval.
-  // The expiry comes from the snapshot authorize used, so a re-approval made mid-run is not wasted.
-  if (approvalKey) {
-    const latest = await stored();
-    const kept = pruneApprovals(latest.approvals, latest.consumed, Date.now()).consumed;
-    await chrome.storage.local.set({consumed: {...kept, [approvalKey]: approvals[approvalKey]}});
-  }
-  const result = await run(job, current);
-  // The worker writes only "created", "requests", "consumed", never the popup's "policy"/"approvals".
-  // Re-read so a concurrent popup change is kept; commands are already serialized by inFlight.
-  if (job.kind === "rest" && job.method !== "GET") {
-    const latest = await stored();
-    const updated = recordCreated(job, result, latest.policy, latest.created);
-    if (updated) await chrome.storage.local.set({created: updated});
-  }
-  return result;
-}
+// Authorize, file requests, consume approvals, run, record created objects: see execute.js (tested there).
+// The worker writes only "created", "requests", "consumed", never the popup's "policy"/"approvals".
+const execute = job => executePipeline(job, {storage: chrome.storage.local, run, refreshBadge});
 
 async function run(job, current) {
   if (job.kind === "rest" && job.method === "GET") return restGet(job);
@@ -154,29 +112,15 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.requests) refreshBadge(); });
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   // Only this extension's popup can manage its connection; no page messaging.
-  if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) return;
+  if (!fromPopup(sender, chrome.runtime)) return;
   if (message.type === "connect") {
     if (socket) socket.close(); socket = null;
     connect().then(() => reply({ok: true})); return true;
   }
   if (message.type === "status") reply({connected: connected()});
-  if (message.type === "resolve_request") {
-    // The popup's Allow/Deny: the worker is the single writer of "requests", so it deletes the entry.
-    chrome.storage.local.get("requests").then(({requests}) => {
-      const {[message.id]: _gone, ...rest} = requests ?? {};
-      return typeof message.id === "string" ? chrome.storage.local.set({requests: rest}) : null;
-    }).then(() => reply({ok: true}));
-    return true;
-  }
-  if (message.type === "revoke_created") {
-    // Popup Revoke: the worker is the single writer of "created", so it drops the document and its grants.
-    chrome.storage.local.get("created").then(({created}) => {
-      const id = typeof message.did === "string" ? message.did.toLowerCase() : null;
-      const drop = obj => Object.fromEntries(Object.entries(obj ?? {}).filter(([k]) => k.toLowerCase() !== id));
-      return id && created ? chrome.storage.local.set({created: {...created, docs: drop(created.docs), grants: drop(created.grants)}}) : null;
-    }).then(() => reply({ok: true}));
-    return true;
-  }
+  // resolve_request, revoke_created, revoke_created_grant: worker-owned storage (execute.js).
+  const pending = popupStorageMessage(message, sender, {storage: chrome.storage.local, runtime: chrome.runtime});
+  if (pending) { pending.then(() => reply({ok: true})); return true; }
   if (message.type === "disconnect") {
     if (socket) socket.close(); socket = null; clearInterval(heartbeat); reply({ok: true});
   }

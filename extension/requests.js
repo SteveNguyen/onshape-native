@@ -15,8 +15,26 @@ const newEntry = () => ({actions: Object.fromEntries(ACTIONS.map(a => [a, false]
 // Sorted-key JSON: the same need always has the same id.
 const stable = v => plain(v) ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v ?? null);
 
-// {method, path_summary} for an approval request: the path only (no query, no body), shown to the user.
-export const describeJob = job => ({method: String(job?.method ?? "").slice(0, 10), path_summary: String(job?.path ?? "").split("?")[0].slice(0, 200)});
+// {method, path_summary, details?} for an approval request, shown to the user: the path (no query), and for
+// merge/restore only the body fields that decide what is overwritten (agent data: bounded, rendered as text).
+// merge: {kind, type, id (source branch/version), strategy, overrides}; restore: {kind, vm, vmid, strategy, overrides}.
+export function describeJob(job) {
+  const path = String(job?.path ?? "").split("?")[0];
+  const out = {method: String(job?.method ?? "").slice(0, 10), path_summary: path.slice(0, 200)};
+  const body = plain(job?.body) ? job.body : {};
+  // Keys are matched case-insensitively, as policy.js reads the override maps.
+  const field = name => Object.entries(body).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
+  const text = name => typeof field(name) === "string" ? field(name).slice(0, 80) : null;
+  const count = name => Object.entries(body).filter(([k, v]) => k.toLowerCase() === name.toLowerCase() && plain(v))
+    .reduce((n, [, v]) => n + Object.keys(v).length, 0);
+  const restore = path.match(/\/restore\/([vm])\/([0-9a-f]{24})$/i);
+  if (/\/workspaces\/[0-9a-f]{24}\/merge$/i.test(path))
+    out.details = {kind: "merge", type: text("type"), id: text("id"), strategy: text("defaultMergeStrategy"), overrides: count("mergeStrategyElementOverrides")};
+  else if (restore)
+    out.details = {kind: "restore", vm: restore[1].toLowerCase(), vmid: restore[2].toLowerCase(), strategy: text("defaultRestoreStrategy"),
+      overrides: count("elementIdToStrategyOverride")};
+  return out;
+}
 
 const live = (requests, now) => Object.values(plain(requests) ? requests : {}).filter(r => plain(r) && r.last_seen >= now - TTL);
 
@@ -28,7 +46,8 @@ export function fileRequest(requests, need, now, describe) {
   const old = kept.find(r => r.id === id);
   const entry = old ? {...old, count: old.count + 1, last_seen: now}
     : {id, need, first_seen: now, last_seen: now, count: 1,
-       ...(need.type === "approval" && plain(describe) ? {method: describe.method, path_summary: describe.path_summary} : {})};
+       ...(need.type === "approval" && plain(describe) ? {method: describe.method, path_summary: describe.path_summary,
+         ...(plain(describe.details) ? {details: describe.details} : {})} : {})};
   const rest = kept.filter(r => r.id !== id);
   return Object.fromEntries([entry, ...rest].sort((a, b) => b.last_seen - a.last_seen).slice(0, MAX).map(r => [r.id, r]));
 }

@@ -354,9 +354,61 @@ test("summary quotes names and neutralizes forged text", async () => {
 test("summary flags advanced switches", async () => {
   const {summary, applyPreset} = await import("../extension/grants.js");
   const t = applyPreset(pol({}), ctx, "tab");
-  assert.equal(summary({...t, allow_ui_fallback: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: UI fallback clicks are ON.');
+  const ui = "Advanced: UI fallback clicks are ON — clicks in an open document are not limited to granted tabs, branches or document actions.";
+  assert.equal(summary({...t, allow_ui_fallback: true}, ctx), `Claude can read and edit "Gripper finger" in branch "feature-gripper". ${ui}`);
   assert.equal(summary({...t, allow_untested_native: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: untested native commands are ON.');
-  assert.match(summary({...pol({}), allow_ui_fallback: true}, ctx), /no tab access.*UI fallback clicks are ON/);
+  assert.ok(summary({...pol({}), allow_ui_fallback: true}, ctx).endsWith(`no tab access in this document. ${ui}`));
+});
+
+// ---- created grants are visible and narrowable in the popup ----
+test("presetOf reads the effective policy: created grants and '*' count", async () => {
+  const {applyPreset, presetOf} = await import("../extension/grants.js");
+  const tab = applyPreset(pol({}), ctx, "tab");
+  // A created tab grant in this branch makes the effective grants custom.
+  const eff = effectivePolicy(tab, {grants: {[D]: {branches: {[W]: {tabs: {[E2]: W_}}}}}});
+  assert.equal(presetOf(eff, ctx), "custom");
+  assert.equal(presetOf(effectivePolicy(tab, {grants: {[D]: {branches: {[W2]: {tabs: {[E2]: W_}}}}}}), ctx), "tab");
+  // A created document ("*" branch) is custom, whatever the stored entry holds.
+  const made = {docs: {[D]: {source: "created", added: 1, branches: {"*": {all: "write", tabs: {}}}, actions: {tabs: true}}}};
+  assert.equal(presetOf(effectivePolicy(pol({}), made), ctx), "custom");
+  assert.equal(presetOf(effectivePolicy(applyPreset(pol({}), ctx, "branch"), made), ctx), "custom");
+  // Created-only branch grant (no stored entry for the branch).
+  assert.equal(presetOf(effectivePolicy(pol({[D]: doc({})}), {grants: {[D]: {branches: {[W]: {all: "write", tabs: {}}}}}}), ctx), "branch");
+});
+
+test("createdGrantRevocations: which created grants a popup change must revoke", async () => {
+  const {createdGrantRevocations} = await import("../extension/grants.js");
+  const created = {grants: {[D]: {branches: {[W]: {tabs: {[E2]: W_}}, [W2]: {all: "read", tabs: {}}}}}};
+  // A tab change revokes that tab's created grant only.
+  assert.deepEqual(createdGrantRevocations(created, ctx, E2), [{type: "revoke_created_grant", did: D, wid: W, eid: E2}]);
+  assert.deepEqual(createdGrantRevocations(created, ctx, E2.toUpperCase()), [{type: "revoke_created_grant", did: D, wid: W, eid: E2}]);
+  assert.deepEqual(createdGrantRevocations(created, ctx, E), []);
+  // A preset (no eid) replaces the branch: the whole created branch entry goes.
+  assert.deepEqual(createdGrantRevocations(created, ctx), [{type: "revoke_created_grant", did: D, wid: W}]);
+  assert.deepEqual(createdGrantRevocations(created, {...ctx, wid: "9".repeat(24)}), []);
+  // Nothing created, malformed or another document: nothing to revoke.
+  for (const c of [undefined, {}, {grants: []}, {grants: {[D]: "x"}}, {grants: {[E]: created.grants[D]}}])
+    assert.deepEqual(createdGrantRevocations(c, ctx, E2), []);
+});
+
+test("revokeCreatedGrant drops one tab or a whole branch and prunes, purely", async () => {
+  const {revokeCreatedGrant} = await import("../extension/grants.js");
+  const created = {docs: {x: 1}, grants: {[D]: {branches: {[W]: {tabs: {[E2]: W_, [E]: R_}}, [W2]: {all: "read", tabs: {}}}}}};
+  const before = structuredClone(created);
+  const one = revokeCreatedGrant(created, D, W, E2);
+  assert.deepEqual(one.grants[D].branches[W].tabs, {[E]: R_});
+  assert.deepEqual(one.docs, {x: 1});
+  assert.deepEqual(created, before);
+  const both = revokeCreatedGrant(one, D.toUpperCase(), W, E);
+  assert.deepEqual(Object.keys(both.grants[D].branches), [W2]);
+  assert.deepEqual(revokeCreatedGrant(both, D, W2).grants, {});
+  // A branch with `all` keeps `all` when one tab goes.
+  const all = {grants: {[D]: {branches: {[W]: {all: "write", tabs: {[E]: W_}}}}}};
+  assert.deepEqual(revokeCreatedGrant(all, D, W, E).grants[D].branches[W], {all: "write", tabs: {}});
+  // Unknown entries and malformed input leave it unchanged; bad ids are refused.
+  assert.equal(revokeCreatedGrant(created, D, "9".repeat(24), E), created);
+  assert.equal(revokeCreatedGrant(undefined, D, W, E), undefined);
+  for (const args of [["x", W, E], [D, "*", E], [D, W, "x"], [D, W, 3]]) assert.throws(() => revokeCreatedGrant(created, ...args), /invalid/);
 });
 
 test("setTab on a new doc carries added and source", async () => {

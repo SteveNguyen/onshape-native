@@ -1,5 +1,5 @@
 import {didFromUrl, docName, docLabel, targetFromUrl} from "./policy.js";
-import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
+import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, createdGrantRevocations, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
 import {approve, approveOnce, liveRequests} from "./requests.js";
 import {branchNames, tabsFromContents} from "./listings.js";
 
@@ -41,6 +41,12 @@ async function change(fn, seedDid) {
   await chrome.storage.local.set({policy});
 }
 const resolve = id => chrome.runtime.sendMessage({type: "resolve_request", id});
+// Narrowing a grant Claude received (created.grants, worker-owned): the worker drops it first (narrow before the
+// stored change), so unticking or a preset is never undone by the created grant. eid absent: the whole branch.
+async function narrowCreated(eid) {
+  const {created} = await chrome.storage.local.get("created");
+  for (const message of createdGrantRevocations(created, ctx, eid)) await chrome.runtime.sendMessage(message);
+}
 
 // ---- banners ----
 function describe(need) {
@@ -65,6 +71,23 @@ function describe(need) {
     default: return `${need.type}${where}`;
   }
 }
+// Lines describing what a merge/restore does (requests.js describeJob). Request fields are untrusted data:
+// only strings and numbers are shown; branch names come from this popup's own listings, never from the request.
+function approvalDetails(need, d) {
+  if (d === null || typeof d !== "object") return [];
+  const str = v => typeof v === "string" ? v : "?";
+  const strategy = typeof d.strategy === "string" ? d.strategy : "server default";
+  const overrides = `Per-tab strategy overrides: ${Number.isInteger(d.overrides) ? d.overrides : "?"}`;
+  if (d.kind === "merge") {
+    const id = str(d.id), here = typeof need.did === "string" && need.did.toLowerCase() === ctx?.did;
+    const name = here && Object.hasOwn(branches, id.toLowerCase()) ? branches[id.toLowerCase()] : undefined;
+    const source = String(d.type).toLowerCase() === "workspace" ? `branch ${name ? `"${name}" (${id})` : id}` : `${str(d.type)} ${id}`;
+    return [`Merge from ${source}`, `Default merge strategy: ${strategy}`, overrides];
+  }
+  if (d.kind === "restore")
+    return [`Restore the branch to ${d.vm === "m" ? "microversion" : d.vm === "v" ? "version" : "?"} ${str(d.vmid)}`, `Default restore strategy: ${strategy}`, overrides];
+  return [];
+}
 function banner(s, r) {
   const need = r.need ?? {}, node = el("div", {className: "banner"});
   const deny = el("button", {textContent: "Deny", onclick: () => resolve(r.id)});
@@ -72,6 +95,7 @@ function banner(s, r) {
     // Merge/restore: a one-time approval of this exact request, only while the document's merge action is on.
     const live = s.approvals?.[need.key] > Date.now(), ready = typeof need.did === "string" && typeof need.key === "string" && actionOn(s.eff, need.did, "merge");
     node.append(el("div", {textContent: `Claude asks to ${need.critical} (once): ${r.method ?? ""} ${r.path_summary ?? ""} in document ${need.did}`}),
+      ...approvalDetails(need, r.details).map(text => el("div", {className: "small", textContent: text})),
       el("div", {className: "muted small", textContent: "Can overwrite others' work. Approval is used once, for this exact request."}));
     if (!ready) node.append(el("div", {className: "warn small", textContent: "Turn on Merge / restore in Document actions first."}));
     node.append(el("div", {className: "row"}, el("button", {textContent: live ? "Approved" : "Approve once", disabled: !ready || live,
@@ -110,16 +134,19 @@ function renderContext(s) {
 function renderPresets(s) {
   const sec = $("presets"); sec.hidden = !(ctx?.wvm === "w" && ctx.eid);
   if (sec.hidden) return;
-  const now = presetOf(s.base, ctx);
+  const now = presetOf(s.eff, ctx);  // effective grants: a created grant is never hidden behind a preset
   const labels = {tab: `This tab only: read + write ${openTab()?.name || ctx.eid}`, tab_read_rest: "This tab, read the rest of the document (this branch)",
     branch: "Whole document in this branch", custom: "Custom…"};
   sec.replaceChildren(...[...PRESETS, "custom"].map(p => el("label", {}, el("input", {type: "radio", name: "preset", checked: now === p,
-    onchange: () => p === "custom" ? ($("custom").open = true) : change(base => applyPreset(base, ctx, p), ctx.did)}), labels[p])));
+    onchange: async () => { if (p === "custom") { $("custom").open = true; return; }
+      await narrowCreated(); await change(base => applyPreset(base, ctx, p), ctx.did); }}), labels[p])));
 }
 function treeRow(s, t) {
   const mode = tabMode(s.eff, ctx.did, ctx.wid, t.eid), whole = branchMode(s.eff, ctx.did, ctx.wid);
   const box = (label, on, locked, set) => el("label", {className: "cb", title: locked ? "Granted by the whole-branch grant" : ""},
-    el("input", {type: "checkbox", checked: on, disabled: locked, onchange: e => change(base => setTab(base, ctx, t.eid, set(e.target.checked)), ctx.did)}), label);
+    el("input", {type: "checkbox", checked: on, disabled: locked, onchange: async e => {
+      const mode = set(e.target.checked);
+      await narrowCreated(t.eid); await change(base => setTab(base, ctx, t.eid, mode), ctx.did); }}), label);
   // Write ticks Read; unticking Read clears the tab.
   return el("div", {className: "row trow" + (t.eid === ctx.eid ? " open" : "")}, el("span", {className: "grow title", textContent: tabLabel(t)}),
     box("R", !!mode, !!whole, on => on ? "read" : null), box("W", mode === "write", whole === "write", on => on ? "write" : "read"));
@@ -129,7 +156,7 @@ function renderTree(s) {
   if (sec.hidden) return;
   // Granted tabs missing from the listing (deleted, or the listing failed) stay visible so they can be cleared.
   const tabs = [...ctx.tabs], known = new Set(tabs.map(t => t.eid));
-  const granted = s.stored.docs[ctx.did]?.branches[ctx.wid]?.tabs ?? {};
+  const granted = s.eff.docs[ctx.did]?.branches[ctx.wid]?.tabs ?? {};  // effective: created grants included
   for (const eid of [...Object.keys(granted), ...(ctx.eid ? [ctx.eid] : [])]) if (!known.has(eid)) { known.add(eid); tabs.push({eid, name: bound(granted[eid]?.name), type: ""}); }
   const folders = new Map();
   for (const t of tabs) folders.set(t.folder ?? "", [...(folders.get(t.folder ?? "") ?? []), t]);
@@ -184,7 +211,7 @@ const did = didFromUrl(active?.url)?.toLowerCase(), target = targetFromUrl(activ
 if (did) ctx = {did, wvm: target?.wvm ?? null, wid: grantable ? target.wvmid.toLowerCase() : "", eid: grantable ? (target.eid ?? "").toLowerCase() : "", docName: docName(active.title), branchName: "", tabs: []};
 chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && (changes.policy || changes.created || changes.requests || changes.approvals)) render(); });
 await render();
-$("custom").open = presetOf((await load()).base, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
+$("custom").open = presetOf((await load()).eff, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
 loadListings().then(render);
 await refresh();
 setInterval(refresh, 1000);

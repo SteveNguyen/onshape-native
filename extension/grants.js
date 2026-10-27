@@ -217,9 +217,13 @@ export function revokeDocument(policy, did) {
   return p;
 }
 
-// Which preset the stored grants of this branch match exactly (names ignored); nothing granted is "none".
+// Which preset the EFFECTIVE grants of this branch match exactly (names ignored); nothing granted is "none".
+// Takes the effectivePolicy output (stored + created docs + created grants), so a grant Claude received is never
+// hidden behind a preset; a "*" branch (created document) is not a preset: "custom".
 export function presetOf(policy, ctx) {
-  const b = branchesOf(checkPolicy(policy), ctx.did)[ctx.wid.toLowerCase()];
+  const all = branchesOf(plain(policy?.docs) && policy.version === 2 ? policy : checkPolicy(policy), ctx.did);
+  if (all["*"]) return "custom";
+  const b = all[ctx.wid.toLowerCase()];
   const eids = Object.keys(b?.tabs ?? {});
   if (!b || (!b.all && !eids.length)) return "none";
   const mine = eids.length === 1 && eids[0] === ctx.eid.toLowerCase() && b.tabs[eids[0]].mode === "write";
@@ -227,6 +231,40 @@ export function presetOf(policy, ctx) {
   if (mine && !b.all) return "tab";
   if (mine && b.all === "read") return "tab_read_rest";
   return "custom";
+}
+
+// ---- created grants (worker-owned "created.grants") narrowed from the popup ----
+// The popup cannot write "created", so it asks the worker to drop the created grant a change would otherwise
+// leave behind: a tab change (eid) drops that tab's created grant, a preset (no eid) the whole created branch entry.
+const keyOf = (obj, id) => plain(obj) ? Object.keys(obj).find(k => k.toLowerCase() === id) : undefined;
+export function createdGrantRevocations(created, ctx, eid) {
+  const did = ctx.did.toLowerCase(), wid = ctx.wid.toLowerCase();
+  const g = plain(created?.grants) ? created.grants[keyOf(created.grants, did)] : undefined;
+  const b = plain(g?.branches) ? g.branches[keyOf(g.branches, wid)] : undefined;
+  if (!plain(b)) return [];
+  if (eid === undefined) return [{type: "revoke_created_grant", did, wid}];
+  const e = eid.toLowerCase();
+  return keyOf(b.tabs, e) !== undefined ? [{type: "revoke_created_grant", did, wid, eid: e}] : [];
+}
+
+// Worker side: the created map without that tab's grant (or the whole branch entry when eid is absent);
+// empty branches and documents are pruned. Pure; returns the same object when there is nothing to drop.
+export function revokeCreatedGrant(created, did, wid, eid) {
+  const id = v => typeof v === "string" && HEX.test(v);
+  if (!id(did) || !id(wid) || (eid !== undefined && !id(eid))) throw new Error("revokeCreatedGrant: invalid id");
+  const dk = plain(created) ? keyOf(created.grants, did.toLowerCase()) : undefined;
+  const wk = dk !== undefined ? keyOf(created.grants[dk]?.branches, wid.toLowerCase()) : undefined;
+  if (wk === undefined) return created;
+  const out = structuredClone(created), branches = out.grants[dk].branches;
+  if (eid === undefined) delete branches[wk];
+  else {
+    const b = branches[wk], ek = plain(b) ? keyOf(b.tabs, eid.toLowerCase()) : undefined;
+    if (ek === undefined) return created;
+    delete b.tabs[ek];
+    if (!b.all && !Object.keys(b.tabs).length) delete branches[wk];
+  }
+  if (!Object.keys(branches).length) delete out.grants[dk];
+  return out;
 }
 
 // Plain-language account of the stored (effective) grants; must never under-state access.
@@ -239,7 +277,8 @@ export function summary(policy, ctx) {
   const tail = [];
   if (acts.length) tail.push(`Document actions on: ${acts.join(", ")}.`);
   if (on.includes("admin")) tail.push("Admin actions are ON.");
-  if (p.allow_ui_fallback === true) tail.push("Advanced: UI fallback clicks are ON.");
+  // The worker cannot see what a page control does: say that clicks escape every grant.
+  if (p.allow_ui_fallback === true) tail.push("Advanced: UI fallback clicks are ON — clicks in an open document are not limited to granted tabs, branches or document actions.");
   if (p.allow_untested_native === true) tail.push("Advanced: untested native commands are ON.");
   const others = Object.entries(all).filter(([w, b]) => w !== wid && w !== "*" && (b.all || Object.keys(b.tabs ?? {}).length));
   if (others.length) tail.push(`+ ${others.length} other branch${others.length > 1 ? "es" : ""} with grants.`);

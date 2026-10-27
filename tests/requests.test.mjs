@@ -58,6 +58,29 @@ test("approval needs are filed with method and an ids-only path summary", () => 
   assert.ok(!JSON.stringify([r.method, r.path_summary]).includes("secret"));
 });
 
+test("describeJob shows what a merge or restore will do", () => {
+  const merge = body => ({kind: "rest", method: "POST", path: `/api/v10/documents/${D}/workspaces/${W}/merge`, body});
+  assert.deepEqual(describeJob(merge({id: W2, type: "workspace", defaultMergeStrategy: "OVERWRITE",
+    mergeStrategyElementOverrides: {[E]: "KEEP", [E2]: "OVERWRITE"}, note: "secret"})).details,
+    {kind: "merge", type: "workspace", id: W2, strategy: "OVERWRITE", overrides: 2});
+  // Missing or non-string fields are null; strings are bounded; key case follows the policy (case-insensitive).
+  assert.deepEqual(describeJob(merge({id: 5, Type: "version", DefaultMergeStrategy: "x".repeat(500)})).details,
+    {kind: "merge", type: "version", id: null, strategy: "x".repeat(80), overrides: 0});
+  assert.deepEqual(describeJob(merge(undefined)).details, {kind: "merge", type: null, id: null, strategy: null, overrides: 0});
+  const restore = (vm, body) => ({kind: "rest", method: "POST", path: `/api/v10/documents/${D}/w/${W}/restore/${vm}/${W2}`, body});
+  assert.deepEqual(describeJob(restore("v", {defaultRestoreStrategy: "KEEP", elementIdToStrategyOverride: {[E]: "OVERWRITE"}})).details,
+    {kind: "restore", vm: "v", vmid: W2, strategy: "KEEP", overrides: 1});
+  assert.deepEqual(describeJob(restore("M", null)).details, {kind: "restore", vm: "m", vmid: W2, strategy: null, overrides: 0});
+  // Other jobs carry no details; nothing else of the body is copied.
+  assert.equal(describeJob({method: "POST", path: `/api/v10/documents/d/${D}/versions`, body: {name: "secret"}}).details, undefined);
+  assert.ok(!JSON.stringify(describeJob(merge({id: W2, type: "workspace", note: "secret"}))).includes("secret"));
+  // fileRequest keeps the details for approval needs only.
+  const job = merge({id: W2, type: "workspace", defaultMergeStrategy: "OVERWRITE"});
+  const need = {did: D, type: "approval", critical: "merge", key: jobKey(job)};
+  assert.deepEqual(Object.values(fileRequest({}, need, 5, describeJob(job)))[0].details, describeJob(job).details);
+  assert.equal(Object.values(fileRequest({}, tabNeed(), 5, describeJob(job)))[0].details, undefined);
+});
+
 test("liveRequests tolerates missing input", () => {
   assert.deepEqual(liveRequests(undefined, 1), []);
 });
