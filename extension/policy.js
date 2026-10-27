@@ -2,7 +2,7 @@
 // The agent may be prompt-injected by model text, so every job is reduced to "needs"
 // (a tab in a branch, a whole branch, a document overview, a document action) and
 // each need must be granted by the user. Anything unclassified is refused.
-import {checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, branchHasWrite, hasAnyGrant, actionOn} from "./grants.js";
+import {checkPolicy, effectivePolicy, unionBranches, tabMode, anyBranchMode, branchMode, branchHasWrite, hasAnyGrant, actionOn} from "./grants.js";
 export {checkPolicy, effectivePolicy};
 
 const HEX = /^[0-9a-f]{24}$/i;
@@ -439,17 +439,55 @@ export function applyPolicy(job, policy, approvals = {}, consumed = [], now = Da
           allow_untested_native: p.allow_untested_native === true};
 }
 
-// After a successful create/copy, returns the new "created" map authorizing the
-// new document (never admin), or null. (v1 output; Task 4 moves it to created.docs/grants.)
+// After a successful create/copy/branch/tab creation, returns the new "created" object
+// ({docs, grants}, inputs untouched) with the grants the new object inherits, or null.
+// Never grants more than the policy already allowed: a created document is never admin,
+// a new branch gets only the union of the document's granted tabs/`all`, a new tab gets write.
 export function recordCreated(job, result, policy, created = {}, now = Date.now()) {
-  if (job.kind !== "rest" || job.method === "GET" || !(result?.status >= 200 && result.status < 300)) return null;
-  const segs = segments(job.path);
-  const rest = segs.slice(segs[1] && /^v\d+$/.test(segs[1]) ? 2 : 1).join("/");
-  const copy = rest.match(/^documents\/([0-9a-f]{24})\/workspaces\/[0-9a-f]{24}\/copy$/);
-  if (!(job.method === "POST" && (rest === "documents" || copy))) return null;
-  if (copy && !hasAnyGrant(effectivePolicy(policy, created), copy[1])) return null;
-  const id = result.body?.newDocumentId ?? result.body?.id;
-  if (typeof id !== "string" || !HEX.test(id)) return null;
-  const name = docName(result.body?.newDocumentName ?? result.body?.name);
-  return {...created, [id.toLowerCase()]: {admin: false, source: "created", added: now, ...(name ? {name} : {})}};
+  if (job.kind !== "rest" || job.method !== "POST" || !(result?.status >= 200 && result.status < 300)) return null;
+  const body = plain(result.body) ? result.body : {};
+  // First of the given response fields that is a 24-hex id.
+  const newId = (...keys) => { const id = keys.map(k => body[k]).find(v => typeof v === "string" && HEX.test(v)); return id?.toLowerCase(); };
+  try {
+    const segs = segments(job.path);
+    const rest = segs.slice(segs[1] && /^v\d+$/.test(segs[1]) ? 2 : 1).join("/");
+    const eff = effectivePolicy(policy, created);
+    const copy = rest.match(new RegExp(`^documents/${H}/workspaces/${H}/copy$`));
+    if (rest === "documents" || copy) {
+      // A copy reads every tab of the source branch: whole-branch read is required (also checked by authorize).
+      if (copy && !branchMode(eff, copy[1], copy[2])) return null;
+      const id = newId("newDocumentId", "id");
+      if (!id) return null;
+      const name = docName(body.newDocumentName ?? body.name);
+      const entry = {source: "created", added: now, ...(name ? {name} : {}), branches: {"*": {all: "write", tabs: {}}},
+        actions: {versions: true, branches: true, tabs: true, merge: true, admin: false}};
+      return {...created, docs: {...created.docs, [id]: entry}};
+    }
+    // Where the new id lands: [did, wid, new tab id] for tab creation, [did, new wid] for a branch.
+    const branches = rest.match(new RegExp(`^documents/d/${H}/workspaces$`));
+    const tabRoute = DOC_ROUTES.find(r => r.method === "POST" && r.pattern.test(rest) && r.needs(...rest.match(r.pattern).slice(1)).some(n => n.type === "branch_write"));
+    if (!branches && !tabRoute) return null;
+    const [did, wid] = branches ? [branches[1]] : rest.match(tabRoute.pattern).slice(1);
+    const docBranches = eff.docs[did]?.branches;
+    const id = newId("id", "newElementId", "elementId");
+    if (!docBranches || !id) return null;
+    let grant;
+    if (branches) {
+      // Onshape branches from a version, so the source branch is unknown: inherit the union over the document's
+      // concrete branches. "*" is skipped (a created document already covers new branches).
+      const acc = {[id]: {tabs: {}}};
+      for (const [w, b] of Object.entries(docBranches)) if (w !== "*") unionBranches(acc, {[id]: b});
+      grant = acc[id];
+      delete grant.name;  // the source branch's display name is not the new branch's
+      if (!grant.all && !Object.keys(grant.tabs).length) return null;
+    } else {
+      if (!branchHasWrite(eff, did, wid)) return null;
+      grant = {tabs: {[id]: {mode: "write"}}};
+    }
+    const target = branches ? id : wid;
+    const prior = created.grants?.[did]?.branches ?? {};
+    const merged = structuredClone(prior);
+    unionBranches(merged, {[target]: grant});
+    return {...created, grants: {...created.grants, [did]: {...created.grants?.[did], branches: merged}}};
+  } catch { return null; }
 }

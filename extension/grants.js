@@ -56,7 +56,7 @@ export function checkPolicy(policy) {
 }
 
 // Adds the grants of `from` into `into` (both normalized branch maps): tabs and `all` take the max mode.
-function unionBranches(into, from) {
+export function unionBranches(into, from) {
   for (const [wid, b] of Object.entries(from)) {
     const cur = into[wid] ??= {tabs: {}};
     if (b.name && !cur.name) cur.name = b.name;

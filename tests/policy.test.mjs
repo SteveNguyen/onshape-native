@@ -269,27 +269,121 @@ test('effective policy merges worker-created documents under popup entries', () 
   for (const bad of [null, [], {docs: {[C]: true}}]) assert.throws(() => effectivePolicy({version: 2, docs: {}}, bad), /policy/i);
 });
 
-test('created and copied documents are auto-authorized only after success from an authorized source', () => {
-  // recordCreated keeps its v1 output until Task 4; only the copy-source check moved to v2 grants.
-  const popup = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read'}}}}};
+const FULL = {versions: true, branches: true, tabs: true, merge: true, admin: false};
+const star = (name, added = 5) => ({source: 'created', added, ...(name ? {name} : {}), branches: {'*': {all: 'write', tabs: {}}}, actions: FULL});
+const ok = body => ({status: 200, body});
+
+test('create document authorizes it fully except admin', () => {
+  const popup = {version: 2, docs: {}};
   const create = rest('/api/v10/documents', 'POST', {body: {name: 'New'}});
-  const added = recordCreated(create, {status: 200, body: {id: C}}, popup, {}, 5);
-  assert.deepEqual(added, {[C]: {admin: false, source: 'created', added: 5}}, 'returns only the created map');
-  const prior = {[B]: {admin: false, source: 'created', added: 1}};
-  assert.deepEqual(Object.keys(recordCreated(create, {status: 200, body: {id: C}}, popup, prior, 5)).sort(), [B, C]);
+  assert.deepEqual(recordCreated(create, ok({id: C}), popup, {}, 5), {docs: {[C]: star()}});
+  assert.equal(recordCreated(create, ok({id: C, name: ' New '}), popup, {}, 5).docs[C].name, 'New');
+  // Existing entries are preserved and inputs are not mutated.
+  const prior = {docs: {[B]: star(undefined, 1)}, grants: {[B]: {branches: {[W]: {tabs: {}}}}}};
+  const snapshot = structuredClone(prior);
+  const out = recordCreated(create, ok({id: C}), popup, prior, 5);
+  assert.deepEqual(Object.keys(out.docs).sort(), [B, C]);
+  assert.deepEqual(out.grants, prior.grants);
+  assert.deepEqual(prior, snapshot);
+  // The created document is usable through the effective policy, but admin stays off.
+  const eff = effectivePolicy(popup, out);
+  allowed(rest(`/api/v6/documents/${C}`), eff);
+  refused(rest(`/api/v6/documents/${C}/share`, 'POST'), /admin/i, eff);
+  for (const bad of [{status: 403, body: {id: C}}, {error: 'failed'}, ok({id: 'not-hex'}), ok({}), {status: 200}, {status: 300, body: {id: C}}])
+    assert.equal(recordCreated(create, bad, popup), null);
+  assert.equal(recordCreated(rest('/api/v10/documents'), ok({id: C}), popup), null);
+  assert.equal(recordCreated(rest(`/api/v6/documents/${A}/workspaces/${W}`, 'POST'), ok({id: C}), popup), null);
+});
+
+test('workspace copy needs whole-branch read', () => {
   const copy = rest(`/api/v6/documents/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'Copy'}});
-  assert.deepEqual(recordCreated(copy, {status: 200, body: {newDocumentId: C}}, popup, {}, 5)[C], {admin: false, source: 'created', added: 5});
-  // A copy of a created document counts as authorized too.
+  const tabOnly = {version: 2, docs: {[A]: {branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}}};
+  const whole = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read'}}}}};
+  refused(copy, /whole branch/i, effectivePolicy(tabOnly));
+  allowed(copy, effectivePolicy(whole));
+  const res = ok({newDocumentId: C, newDocumentName: ' Copy of X '});
+  assert.deepEqual(recordCreated(copy, res, whole, {}, 5), {docs: {[C]: star('Copy of X')}});
+  // Defense in depth: no whole-branch read, nothing recorded.
+  assert.equal(recordCreated(copy, res, tabOnly, {}, 5), null);
+  // Another branch's whole read does not count.
+  const other = rest(`/api/v6/documents/${A}/workspaces/${W2}/copy`, 'POST');
+  assert.equal(recordCreated(other, res, whole, {}, 5), null);
+  // A created document ("*") is a readable source.
   const fromB = rest(`/api/v6/documents/${B}/workspaces/${W}/copy`, 'POST');
-  assert.equal(recordCreated(fromB, {status: 200, body: {newDocumentId: C}}, popup), null);
-  assert.ok(recordCreated(fromB, {status: 200, body: {newDocumentId: C}}, popup, {docs: {[B]: createdDoc}})[C]);
-  // A document entry without any grant is not an authorized source.
-  assert.equal(recordCreated(fromB, {status: 200, body: {newDocumentId: C}}, {version: 2, docs: {[B]: {actions: {tabs: true}}}}), null);
-  assert.equal(recordCreated(create, {status: 403, body: {id: C}}, popup), null);
-  assert.equal(recordCreated(create, {error: 'failed'}, popup), null);
-  assert.equal(recordCreated(create, {status: 200, body: {id: 'not-hex'}}, popup), null);
-  assert.equal(recordCreated(rest('/api/v10/documents'), {status: 200, body: {id: C}}, popup), null);
-  assert.equal(recordCreated(rest(`/api/v6/documents/${A}/workspaces/${W}`, 'POST'), {status: 200, body: {id: C}}, popup), null);
+  assert.equal(recordCreated(fromB, res, whole), null);
+  assert.ok(recordCreated(fromB, res, whole, {docs: {[B]: star()}}, 5).docs[C]);
+  assert.equal(recordCreated(copy, ok({newDocumentId: 'bad'}), whole), null);
+});
+
+test('new branch inherits only granted tabs', () => {
+  const branches = rest(`/api/v6/documents/d/${A}/workspaces`, 'POST', {body: {name: 'b', versionId: V}});
+  const popup = {version: 2, docs: {[A]: {actions: FULL, branches: {
+    [W]: {all: 'read', tabs: {[E]: {mode: 'write'}}},
+    [W2]: {tabs: {[E]: {mode: 'read'}, [E2]: {mode: 'read'}}}}}}};
+  const NEW = '4'.repeat(24);
+  const out = recordCreated(branches, ok({id: NEW}), popup, {}, 5);
+  assert.deepEqual(out.grants, {[A]: {branches: {[NEW]: {all: 'read', tabs: {[E]: {mode: 'write'}, [E2]: {mode: 'read'}}}}}});
+  const eff = effectivePolicy(popup, out);
+  assert.equal(branchModeOf(eff, NEW), 'read');
+  // Nothing outside the union: no "*", no actions, other docs untouched.
+  assert.equal(out.grants[A].branches['*'], undefined);
+  assert.equal(out.docs, undefined);
+  // Tab-only doc: only those tabs.
+  const tabsOnly = {version: 2, docs: {[A]: {actions: FULL, branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}}};
+  assert.deepEqual(recordCreated(branches, ok({id: NEW}), tabsOnly, {}, 5).grants[A].branches[NEW], {tabs: {[E]: {mode: 'write'}}});
+  // A created document ("*") already covers new branches; a doc with no grants has nothing to inherit.
+  assert.equal(recordCreated(branches, ok({id: NEW}), {version: 2, docs: {}}, {docs: {[A]: star()}}), null);
+  assert.equal(recordCreated(branches, ok({id: NEW}), {version: 2, docs: {[A]: {actions: FULL}}}), null);
+  assert.equal(recordCreated(branches, ok({id: 'bad'}), popup), null);
+  assert.equal(recordCreated(branches, {status: 500, body: {id: NEW}}, popup), null);
+  // Existing created grants are preserved and the inputs are not mutated.
+  const prior = {grants: {[A]: {branches: {[W2]: {tabs: {[E2]: {mode: 'read'}}}}}}};
+  const snapshot = structuredClone(prior);
+  const again = recordCreated(branches, ok({id: NEW}), popup, prior, 5);
+  assert.deepEqual(again.grants[A].branches[W2], prior.grants[A].branches[W2]);
+  assert.ok(again.grants[A].branches[NEW]);
+  assert.deepEqual(prior, snapshot);
+});
+const branchModeOf = (eff, wid) => eff.docs[A].branches[wid]?.all;
+
+test('created tab gets write', () => {
+  const popup = {version: 2, docs: {[A]: {actions: FULL, branches: {[W]: {tabs: {[E]: {mode: 'write'}}}}}}};
+  const NEW = '5'.repeat(24);
+  const routes = [`/api/v6/partstudios/d/${A}/w/${W}`, `/api/v6/assemblies/d/${A}/w/${W}`, `/api/v6/featurestudios/d/${A}/w/${W}`,
+    `/api/v6/blobelements/d/${A}/w/${W}`, `/api/v6/variables/d/${A}/w/${W}/variablestudio`, `/api/v6/drawings/d/${A}/w/${W}/create`,
+    `/api/v6/translations/d/${A}/w/${W}`, `/api/v6/elements/copyelement/${A}/workspace/${W}`];
+  for (const path of routes) {
+    const job = rest(path, 'POST', {body: {name: 'x'}});
+    const out = recordCreated(job, ok({id: NEW}), popup, {}, 5);
+    assert.deepEqual(out, {grants: {[A]: {branches: {[W]: {tabs: {[NEW]: {mode: 'write'}}}}}}}, path);
+    assert.equal(effectivePolicy(popup, out).docs[A].branches[W].tabs[NEW].mode, 'write');
+  }
+  const copy = rest(`/api/v6/elements/copyelement/${A}/workspace/${W}`, 'POST');
+  assert.ok(recordCreated(copy, ok({newElementId: NEW}), popup, {}, 5).grants[A].branches[W].tabs[NEW]);
+  assert.ok(recordCreated(copy, ok({elementId: NEW}), popup, {}, 5).grants[A].branches[W].tabs[NEW]);
+  // Existing grants for the branch are kept alongside.
+  const prior = {grants: {[A]: {branches: {[W]: {tabs: {[E2]: {mode: 'read'}}}, [W2]: {tabs: {}}}}}};
+  const snapshot = structuredClone(prior);
+  const out = recordCreated(copy, ok({id: NEW}), popup, prior, 5);
+  assert.deepEqual(Object.keys(out.grants[A].branches[W].tabs).sort(), [E2, NEW].sort());
+  assert.ok(out.grants[A].branches[W2]);
+  assert.deepEqual(prior, snapshot);
+  // Without a document entry the grant is meaningless: nothing recorded. Bad ids and non-tab routes record nothing.
+  assert.equal(recordCreated(copy, ok({id: NEW}), {version: 2, docs: {}}), null);
+  assert.equal(recordCreated(copy, ok({id: 'bad'}), popup), null);
+  assert.equal(recordCreated(copy, ok({}), popup), null);
+  assert.equal(recordCreated(rest(`/api/v6/documents/d/${A}/w/${W}/moveelement`, 'POST'), ok({id: NEW}), popup), null);
+  assert.equal(recordCreated(rest(`/api/v6/partstudios/d/${A}/w/${W}/e/${E}`, 'POST'), ok({id: NEW}), popup), null);
+});
+
+test('failed responses record nothing', () => {
+  const popup = {version: 2, docs: {[A]: {actions: FULL, branches: {[W]: {all: 'write'}}}}};
+  const jobs = [rest('/api/v10/documents', 'POST'), rest(`/api/v6/documents/${A}/workspaces/${W}/copy`, 'POST'),
+    rest(`/api/v6/documents/d/${A}/workspaces`, 'POST'), rest(`/api/v6/partstudios/d/${A}/w/${W}`, 'POST')];
+  for (const job of jobs) for (const bad of [{status: 400, body: {id: C}}, {status: 199, body: {id: C}}, {error: 'x'}, undefined, null])
+    assert.equal(recordCreated(job, bad, popup), null);
+  assert.equal(recordCreated({...jobs[0], kind: 'native'}, ok({id: C}), popup), null);
+  assert.equal(recordCreated({...jobs[0], method: 'GET'}, ok({id: C}), popup), null);
 });
 
 test('document names are bounded optional strings, labelled "name — id"', () => {
@@ -304,10 +398,9 @@ test('document names are bounded optional strings, labelled "name — id"', () =
   assert.throws(() => effectivePolicy({version: 2, docs: {}}, {docs: {[C]: {name: ['x']}}}), /policy/i);
   const popup = {version: 2, docs: {[A]: {branches: {[W]: {all: 'read'}}}}};
   const copy = rest(`/api/v6/documents/${A}/workspaces/${W}/copy`, 'POST', {body: {newName: 'Copy'}});
-  assert.deepEqual(recordCreated(copy, {status: 200, body: {newDocumentId: C, newDocumentName: ' Copy of X '}}, popup, {}, 5)[C],
-    {admin: false, source: 'created', added: 5, name: 'Copy of X'});
+  assert.equal(recordCreated(copy, {status: 200, body: {newDocumentId: C, newDocumentName: ' Copy of X '}}, popup, {}, 5).docs[C].name, 'Copy of X');
   const create = rest('/api/v10/documents', 'POST', {body: {name: 'New'}});
-  assert.equal(recordCreated(create, {status: 200, body: {id: C, name: 'New'}}, popup, {}, 5)[C].name, 'New');
+  assert.equal(recordCreated(create, {status: 200, body: {id: C, name: 'New'}}, popup, {}, 5).docs[C].name, 'New');
 });
 
 test('tab URLs map to document ids and targets', () => {
