@@ -168,12 +168,15 @@ export function applyPreset(policy, ctx, preset) {
 }
 
 // Sets the exact mode on one tab (may lower write to read); null removes it and prunes empty branch/doc entries.
-export function setTab(policy, ctx, eid, mode) {
+export function setTab(policy, ctx, eid, mode, now = Date.now()) {
   eid = eid.toLowerCase();
   if (mode !== null) {
     const base = structuredClone(checkPolicy(policy));
     delete base.docs[ctx.did.toLowerCase()]?.branches[ctx.wid.toLowerCase()]?.tabs[eid]; // grantTab only raises
-    return grantTab(base, ctx.did, ctx.wid, eid, mode, {doc: ctx.docName, branch: ctx.branchName, tab: tabName(ctx, eid)});
+    const isNew = !base.docs[ctx.did.toLowerCase()];
+    const p = grantTab(base, ctx.did, ctx.wid, eid, mode, {doc: ctx.docName, branch: ctx.branchName, tab: tabName(ctx, eid)});
+    if (isNew) Object.assign(p.docs[ctx.did.toLowerCase()], {added: now, source: "user"});
+    return p;
   }
   const p = structuredClone(checkPolicy(policy));
   const did = ctx.did.toLowerCase(), wid = ctx.wid.toLowerCase();
@@ -221,17 +224,23 @@ export function summary(policy, ctx) {
   const tail = [];
   if (acts.length) tail.push(`Document actions on: ${acts.join(", ")}.`);
   if (on.includes("admin")) tail.push("Admin actions are ON.");
+  if (p.allow_ui_fallback === true) tail.push("Advanced: UI fallback clicks are ON.");
+  if (p.allow_untested_native === true) tail.push("Advanced: untested native commands are ON.");
   const others = Object.entries(all).filter(([w, b]) => w !== wid && w !== "*" && (b.all || Object.keys(b.tabs ?? {}).length));
   if (others.length) tail.push(`+ ${others.length} other branch${others.length > 1 ? "es" : ""} with grants.`);
   if (!hasAnyGrant(p, did)) {
-    return on.length ? ["Claude has no tab access in this document.", ...tail].join(" ") : "Claude has no access to this document.";
+    return tail.length ? ["Claude has no tab access in this document.", ...tail].join(" ") : "Claude has no access to this document.";
   }
   // This branch plus the "*" wildcard: tabs take the max mode, whole-branch the max of both.
   const mm = {}; for (const b of [here, star]) if (b) unionBranches(mm, {m: b});
   const m = mm.m ?? {tabs: {}};
-  const names = mode => Object.entries(m.tabs).filter(([, t]) => t.mode === mode).map(([e]) => tabName(ctx, e) || bound(m.tabs[e].name) || e);
-  const scope = star ? "all branches" : `branch ${bound(ctx.branchName) || wid}`;
-  const whole = star ? "the whole document in all branches" : `the whole branch ${bound(ctx.branchName) || wid}`;
+  // Names are Onshape text: quote them (inner quotes and control chars neutralized) so they cannot forge sentences.
+  const q = n => { const c = bound(n).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").replace(/"/g, "\u2019").trim(); return c && `"${c}"`; };
+  // Classify by EFFECTIVE mode (tab, whole branch, "*"), like tabMode.
+  const names = mode => Object.entries(m.tabs).filter(([, t]) => max(t.mode, m.all) === mode).map(([e]) => q(tabName(ctx, e)) || q(m.tabs[e].name) || e);
+  const bn = q(ctx.branchName) || wid;
+  const scope = star ? "all branches" : `branch ${bn}`;
+  const whole = star ? "the whole document in all branches" : `the whole branch ${bn}`;
   const write = names("write"), read = names("read");
   const out = [];
   if (!write.length && m.all !== "write") {

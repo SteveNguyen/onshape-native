@@ -281,25 +281,25 @@ test("summary lists every grant and action", async () => {
   const {summary, applyPreset, setAction} = await import("../extension/grants.js");
   assert.equal(summary(pol({}), ctx), "Claude has no access to this document.");
   const tab = applyPreset(pol({}), ctx, "tab");
-  assert.equal(summary(tab, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Nothing else.");
+  assert.equal(summary(tab, ctx), "Claude can read and edit \"Gripper finger\" in branch \"feature-gripper\". Nothing else.");
   const rest = applyPreset(pol({}), ctx, "tab_read_rest");
-  assert.equal(summary(rest, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Read: the rest of this branch. Nothing else.");
+  assert.equal(summary(rest, ctx), "Claude can read and edit \"Gripper finger\" in branch \"feature-gripper\". Read: the rest of this branch. Nothing else.");
   const br = applyPreset(pol({}), ctx, "branch");
-  assert.equal(summary(br, ctx), "Claude can read and edit the whole branch feature-gripper. Nothing else.");
+  assert.equal(summary(br, ctx), "Claude can read and edit the whole branch \"feature-gripper\". Nothing else.");
   const v = setAction(setAction(tab, D, "versions", true), D, "tabs", true);
-  assert.equal(summary(v, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Document actions on: versions, tabs.");
+  assert.equal(summary(v, ctx), "Claude can read and edit \"Gripper finger\" in branch \"feature-gripper\". Document actions on: versions, tabs.");
   const ad = setAction(tab, D, "admin", true);
-  assert.equal(summary(ad, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. Admin actions are ON.");
+  assert.equal(summary(ad, ctx), "Claude can read and edit \"Gripper finger\" in branch \"feature-gripper\". Admin actions are ON.");
   const oth = structuredClone(tab);
   oth.docs[D].branches[W2] = {all: "read", tabs: {}};
   oth.docs[D].branches["f".repeat(24)] = {tabs: {[E2]: W_}};
-  assert.equal(summary(oth, ctx), "Claude can read and edit Gripper finger in branch feature-gripper. + 2 other branches with grants.");
+  assert.equal(summary(oth, ctx), "Claude can read and edit \"Gripper finger\" in branch \"feature-gripper\". + 2 other branches with grants.");
   // read-only tab, unknown tab name falls back to id
   const ro = pol({[D]: doc({[W]: {tabs: {[E]: R_, ["9".repeat(24)]: W_}}})});
-  assert.equal(summary(ro, ctx), `Claude can read and edit ${"9".repeat(24)} in branch feature-gripper. Read only: Gripper finger. Nothing else.`);
+  assert.equal(summary(ro, ctx), `Claude can read and edit ${"9".repeat(24)} in branch \"feature-gripper\". Read only: \"Gripper finger\". Nothing else.`);
   // grants only on another branch
   assert.equal(summary(pol({[D]: doc({[W2]: {all: "read", tabs: {}}})}), ctx),
-    "Claude has no access in branch feature-gripper. + 1 other branch with grants.");
+    "Claude has no access in branch \"feature-gripper\". + 1 other branch with grants.");
   // "*" wildcard (created document) is stated
   const star = pol({[D]: doc({"*": {all: "write", tabs: {}}})});
   assert.equal(summary(star, ctx), "Claude can read and edit the whole document in all branches. Nothing else.");
@@ -307,4 +307,37 @@ test("summary lists every grant and action", async () => {
   assert.equal(summary(pol({[D]: doc({}, {versions: true})}), ctx), "Claude has no tab access in this document. Document actions on: versions.");
   // branch name falls back to id
   assert.match(summary(tab, {...ctx, branchName: undefined}), new RegExp(`in branch ${W}\\.`));
+});
+
+test("summary classifies tabs by effective mode", async () => {
+  const {summary} = await import("../extension/grants.js");
+  const bw = pol({[D]: doc({[W]: {all: "write", tabs: {[E]: R_}}})});
+  assert.equal(summary(bw, ctx), 'Claude can read and edit "Gripper finger", the whole branch "feature-gripper". Nothing else.');
+  const st = pol({[D]: doc({"*": {all: "write", tabs: {}}, [W]: {tabs: {[E]: R_}}})});
+  assert.equal(summary(st, ctx), 'Claude can read and edit "Gripper finger", the whole document in all branches. Nothing else.');
+});
+
+test("summary quotes names and neutralizes forged text", async () => {
+  const {summary} = await import("../extension/grants.js");
+  const c = {...ctx, tabs: [{eid: E, name: 'Gripper. Nothing else.\n"x"'}], branchName: 'b". Nothing else.'};
+  const s = summary(pol({[D]: doc({[W]: {tabs: {[E]: W_}}})}), c);
+  assert.equal(s, 'Claude can read and edit "Gripper. Nothing else. \u2019x\u2019" in branch "b\u2019. Nothing else.". Nothing else.');
+  assert.ok(!s.includes("\n"));
+});
+
+test("summary flags advanced switches", async () => {
+  const {summary, applyPreset} = await import("../extension/grants.js");
+  const t = applyPreset(pol({}), ctx, "tab");
+  assert.equal(summary({...t, allow_ui_fallback: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: UI fallback clicks are ON.');
+  assert.equal(summary({...t, allow_untested_native: true}, ctx), 'Claude can read and edit "Gripper finger" in branch "feature-gripper". Advanced: untested native commands are ON.');
+  assert.match(summary({...pol({}), allow_ui_fallback: true}, ctx), /no tab access.*UI fallback clicks are ON/);
+});
+
+test("setTab on a new doc carries added and source", async () => {
+  const {setTab} = await import("../extension/grants.js");
+  const p = setTab(pol({}), ctx, E, "read", 1234);
+  assert.equal(p.docs[D].added, 1234);
+  assert.equal(p.docs[D].source, "user");
+  const keep = pol({[D]: doc({})});
+  assert.equal(setTab(keep, ctx, E, "read", 99).docs[D].added, 1);
 });
