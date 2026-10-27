@@ -135,7 +135,7 @@ function renderPresets(s) {
   const sec = $("presets"); sec.hidden = !(ctx?.wvm === "w" && ctx.eid);
   if (sec.hidden) return;
   const now = presetOf(s.eff, ctx);  // effective grants: a created grant is never hidden behind a preset
-  const labels = {tab: `This tab only: read + write ${openTab()?.name || ctx.eid}`, tab_read_rest: "This tab, read the rest of the document (this branch)",
+  const labels = {tab_read: `This tab only: read only ${openTab()?.name || ctx.eid}`, tab: `This tab only: read + write ${openTab()?.name || ctx.eid}`, tab_read_rest: "This tab, read the rest of the document (this branch)",
     branch: "Whole document in this branch", custom: "Custom…"};
   sec.replaceChildren(...[...PRESETS, "custom"].map(p => el("label", {}, el("input", {type: "radio", name: "preset", checked: now === p,
     onchange: async () => { if (p === "custom") { $("custom").open = true; return; }

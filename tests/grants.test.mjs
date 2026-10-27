@@ -234,7 +234,8 @@ const W_ = {mode: "write"}, R_ = {mode: "read"};
 
 test("presetOf is exact", async () => {
   const {applyPreset, presetOf, PRESETS} = await import("../extension/grants.js");
-  assert.deepEqual(PRESETS, ["tab", "tab_read_rest", "branch"]);
+  assert.deepEqual(PRESETS, ["tab_read", "tab", "tab_read_rest", "branch"]);
+  assert.equal(applyPreset(pol({}), ctx, "tab_read").docs[D].branches[W].tabs[E].mode, "read");
   assert.equal(presetOf(pol({}), ctx), "none");
   assert.equal(presetOf(pol({[D]: doc({[W]: {tabs: {}}})}), ctx), "none");
   for (const p of PRESETS) assert.equal(presetOf(applyPreset(pol({}), ctx, p), ctx), p);
@@ -242,7 +243,9 @@ test("presetOf is exact", async () => {
   const extra = structuredClone(tab); extra.docs[D].branches[W].tabs[E2] = R_;
   assert.equal(presetOf(extra, ctx), "custom");
   const lowered = structuredClone(tab); lowered.docs[D].branches[W].tabs[E] = R_;
-  assert.equal(presetOf(lowered, ctx), "custom");
+  assert.equal(presetOf(lowered, ctx), "tab_read");
+  const readExtra = structuredClone(lowered); readExtra.docs[D].branches[W].tabs[E2] = R_;
+  assert.equal(presetOf(readExtra, ctx), "custom");
   const rest = applyPreset(pol({}), ctx, "tab_read_rest");
   rest.docs[D].branches[W].all = "write";
   assert.equal(presetOf(rest, ctx), "custom");

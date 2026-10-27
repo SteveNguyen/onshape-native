@@ -146,7 +146,7 @@ export const actionOn = (policy, did, action) => policy.docs?.[did?.toLowerCase(
 // ---- popup model (pure; the popup is a thin DOM layer over these) ----
 // ctx = {did, wid, eid, docName, branchName, tabs: [{eid, name, type, folder?}]}; names are display-only.
 
-export const PRESETS = ["tab", "tab_read_rest", "branch"];
+export const PRESETS = ["tab_read", "tab", "tab_read_rest", "branch"];
 const noActions = () => Object.fromEntries(ACTIONS.map(a => [a, false]));
 const tabName = (ctx, eid) => bound(ctx.tabs?.find(t => t?.eid?.toLowerCase() === eid)?.name);
 
@@ -165,7 +165,7 @@ export function applyPreset(policy, ctx, preset) {
   const eid = ctx.eid.toLowerCase();
   const {p, entry, wid} = withEntry(policy, ctx);
   const name = entry.branches[wid]?.name ?? (bound(ctx.branchName) || undefined);
-  const mine = {mode: "write", ...(tabName(ctx, eid) && {name: tabName(ctx, eid)})};
+  const mine = {mode: preset === "tab_read" ? "read" : "write", ...(tabName(ctx, eid) && {name: tabName(ctx, eid)})};
   const b = preset === "branch" ? {all: "write", tabs: {}} : {...(preset === "tab_read_rest" && {all: "read"}), tabs: {[eid]: mine}};
   entry.branches[wid] = name ? {name, ...b} : b;
   return p;
@@ -227,8 +227,10 @@ export function presetOf(policy, ctx) {
   const b = all[ctx.wid.toLowerCase()];
   const eids = Object.keys(b?.tabs ?? {});
   if (!b || (!b.all && !eids.length)) return "none";
-  const mine = eids.length === 1 && eids[0] === ctx.eid.toLowerCase() && b.tabs[eids[0]].mode === "write";
+  const only = eids.length === 1 && eids[0] === ctx.eid.toLowerCase();
+  const mine = only && b.tabs[eids[0]].mode === "write";
   if (b.all === "write" && !eids.length) return "branch";
+  if (only && !b.all && b.tabs[eids[0]].mode === "read") return "tab_read";
   if (mine && !b.all) return "tab";
   if (mine && b.all === "read") return "tab_read_rest";
   return "custom";
