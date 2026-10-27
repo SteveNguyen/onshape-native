@@ -1,11 +1,19 @@
-// Document scoping. Pure: the worker loads the popup-managed policy and passes it in.
-// The agent may be prompt-injected by model text, so every job must name only
-// documents the user authorized, and admin actions need a per-document opt-in.
+// Tab-scoped access. Pure: the worker loads the popup-managed policy and passes it in.
+// The agent may be prompt-injected by model text, so every job is reduced to "needs"
+// (a tab in a branch, a whole branch, a document overview, a document action) and
+// each need must be granted by the user. Anything unclassified is refused.
+import {checkPolicy, effectivePolicy, tabMode, anyBranchMode, branchMode, hasAnyGrant, actionOn} from "./grants.js";
+export {checkPolicy, effectivePolicy};
+
 const HEX = /^[0-9a-f]{24}$/i;
+const H = "([0-9a-f]{24})";
 // Every 24-hex token in a string is a potential document id: alphanumeric-bounded
 // so comma lists, hrefs and "x_<id>" match, with an optional "d" prefix for
 // "d<did>::v<vid>::e<eid>::m<mid>" namespaces (the v/e/m parts are not dids).
 const ID = /(?<![0-9a-z])d?([0-9a-f]{24})(?![0-9a-z])/gi;
+// "e<eid>" tokens (namespaces) are element references; "d<did>::…::e<eid>" names their document.
+const ELEMENT = /(?<![0-9a-z])e([0-9a-f]{24})(?![0-9a-z])/gi;
+const NAMESPACE = /(?<![0-9a-z])d([0-9a-f]{24})::(?:[^\s,:]+::)*e([0-9a-f]{24})(?![0-9a-z])/gi;
 // Keys whose value the server never resolves as a document: each id is scoped by
 // a document named elsewhere in the request, and that document is checked.
 const SAFE_ID_KEYS = new Set([
@@ -15,11 +23,16 @@ const SAFE_ID_KEYS = new Set([
   "nodeid", "nodeids", "featureid", "featureids", "partid", "partids", "groupid",  // feature tree, part and folder nodes
   "propertyid",  // metadata property ids (24-hex) in updateWVEMetadata
 ]);
+// Element ids in these keys are tab references (read, any branch) in the object's document.
+const ELEMENT_KEYS = new Set(["elementid", "elementids", "elementidsource", "eid"]);
+const DOCUMENT_KEYS = ["documentid", "documentidsource", "did"];
 // Path ids after these segments are workspace/element/version/microversion ids,
 // translation ids, comment ids, tree node ids or export file ids, not documents.
 const NOT_DID_AFTER = new Set(["w", "e", "v", "m", "workspace", "workspaces", "version", "versions", "microversion", "microversions",
   "translations", "comments", "featureid", "nodeid", "partid", "externaldata"]);
-const ASK = "Ask the user to authorize it in the Onshape Native extension popup.";
+const ASK = "Ask the user to grant access to it in the Onshape Native extension popup.";
+const FILED = "An access request was filed: ask the user to approve it in the Onshape Native popup.";
+const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 // Requests that name no document. Everything else without a path did is refused.
 const NO_DOCUMENT = [
   ["GET", /^users\/sessioninfo$/],   // signed-in user check
@@ -37,6 +50,60 @@ const ADMIN_FIELD = /^(?:owner|public|email|anonymous|share)|^(?:parentid|projec
 const unset = v => v == null || v === false || v === 0 || v === "" || v === "false" || Array.isArray(v);
 const plain = v => v !== null && typeof v === "object" && !Array.isArray(v);
 
+// Copy of READS in onshape_native/native_catalog.py (kept equal by a Python test).
+export const NATIVE_READS = new Set([
+  "ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiMeasureCall",
+  "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchGetProjectionCall",
+  "ui.GBTUiMassPropCall", "ui.GBTUiGetQueryDataCall", "ui.document.GBTUiQueryInsertables",
+  "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest",
+]);
+// Native commands that create, delete, rename, copy or regroup tabs (mirroring creates derived tabs).
+const NATIVE_TABS = new Set(["ui.document.GBTUiEditElementGroups", "ui.document.GBTUiDeleteElements", "ui.document.GBTUiCopyElements",
+  "ui.document.GBTUiRenameElement", "ui.document.GBTUiInsertElement", "ui.GBTUiAssemblyMirrorCreateDerivedElements"]);
+// Native commands that change the branch, create a version or rename the document: never through this extension.
+const NATIVE_REFUSED = new Set(["ui.document.GBTUiUpgradeWorkspaceCall", "ui.GBTUiWorkspaceRenamed",
+  "ui.assembly.GBTUiCreateExternalReferenceVersion", "ui.GBTUiDocumentRenamed"]);
+const TARGETED = {state: "read", schema: "read", open: "read", display: "read", ui_inspect: "read", ui_action: "write", native: null};
+
+const tab = (did, wid, eid, mode) => ({did, type: "tab", wid, eid, mode});
+const branch = (did, wid, mode) => ({did, type: "branch", wid, mode});
+const overview = did => ({did, type: "overview"});
+const action = (did, name) => ({did, type: "action", action: name});
+
+// Non-GET element routes that only read: [tail after /e/{eid}/, read-only path without a branch segment].
+const READ_POSTS = /^(?:featurescript|idtranslations|export(?:\/(?:gltf|obj|step))?|translations|content\/jsonpaths)$/;
+// Document-level routes (version-stripped, lower-cased path) → needs. Anything else is refused.
+const DOC_ROUTES = [
+  // Overview: names, lists and history of the document; any grant on it is enough.
+  ["GET", `documents/${H}`, d => [overview(d)]],
+  ["GET", `documents/d/${H}/[wvm]/[0-9a-f]{24}/(?:contents|elements|unitinfo|currentmicroversion|insertables|documenthistory)`, d => [overview(d)]],
+  ["GET", `documents/d/${H}/versions(?:/[0-9a-f]{24})?`, d => [overview(d)]],
+  ["GET", `documents/d/${H}/workspaces`, d => [overview(d)]],
+  ["GET", `documents/${H}/w/[0-9a-f]{24}/mergepreview`, d => [overview(d)]],
+  ["GET", `appelements/d/${H}/[wvm]/[0-9a-f]{24}/resolvereferences`, d => [overview(d)]],
+  ["GET", `metadata/d/${H}/[wvm]/[0-9a-f]{24}/e`, d => [overview(d)]],
+  ["GET", `insertables/d/${H}/latest`, d => [overview(d)]],
+  ["GET", `documents/d/${H}/externaldata/[0-9a-f]{24}`, d => [overview(d)]],
+  // Versioning: additive operations need their toggle; merge/restore also a whole-branch write and a one-shot approval.
+  ["POST", `documents/d/${H}/versions`, d => [action(d, "versions")]],
+  ["POST", `documents/d/${H}/workspaces`, d => [action(d, "branches")]],
+  ["POST", `documents/${H}/workspaces/${H}/merge`, (d, w) => [action(d, "merge"), branch(d, w, "write")], "merge"],
+  ["POST", `documents/${H}/w/${H}/restore/[vm]/[0-9a-f]{24}`, (d, w) => [action(d, "merge"), branch(d, w, "write")], "restore"],
+  // Tab creation.
+  ["POST", `(?:partstudios|assemblies|featurestudios|blobelements)/d/${H}/w/[0-9a-f]{24}`, d => [action(d, "tabs")]],
+  ["POST", `variables/d/${H}/w/[0-9a-f]{24}/variablestudio`, d => [action(d, "tabs")]],
+  ["POST", `drawings/d/${H}/w/[0-9a-f]{24}/create`, d => [action(d, "tabs")]],
+  ["POST", `translations/d/${H}/w/[0-9a-f]{24}`, d => [action(d, "tabs")]],
+  // The source tab is a body reference (documentIdSource/elementIdSource), a read need.
+  ["POST", `elements/copyelement/${H}/workspace/[0-9a-f]{24}`, d => [action(d, "tabs")]],
+  // Copying a branch to a new document reads every tab of it.
+  ["POST", `documents/${H}/workspaces/${H}/copy`, (d, w) => [branch(d, w, "read")]],
+  // Document attributes, notes and moving tabs to another document are admin.
+  ["POST", `documents/${H}`, d => [action(d, "admin")], null, "document attributes"],
+  ["POST", `documents/${H}/notes`, d => [action(d, "admin")], null, "document notes"],
+  ["POST", `documents/d/${H}/w/[0-9a-f]{24}/moveelement`, d => [action(d, "admin")], null, "move tabs to another document"],
+].map(([method, pattern, needs, critical, admin]) => ({method, pattern: new RegExp(`^${pattern}$`), needs, critical, admin}));
+
 export function didFromUrl(url) {
   try {
     const parsed = new URL(url);
@@ -45,11 +112,20 @@ export function didFromUrl(url) {
   } catch { return null; }
 }
 
+// Element (or branch/version) a browser tab shows; null for other pages and hosts.
+export function targetFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== "https://cad.onshape.com") return null;
+    const m = parsed.pathname.match(/^\/documents\/([0-9a-f]{24})\/([wvm])\/([0-9a-f]{24})(?:\/e\/([0-9a-f]{24}))?(?:\/|$)/);
+    return m ? {did: m[1], wvm: m[2], wvmid: m[3], eid: m[4] ?? null} : null;
+  } catch { return null; }
+}
+
 // Document names are display-only model text (tab titles, create/copy responses):
 // bounded here and rendered with textContent only. They never grant access.
 export const docName = text => typeof text === "string" ? text.trim().slice(0, 120) : "";
 export const docLabel = (id, entry) => entry?.name ? `${entry.name} — ${id}` : id;
-const entryOk = entry => plain(entry) && (entry.name === undefined || typeof entry.name === "string");
 
 // Decode exactly once. Anything a server or fetch() could read another way
 // (double encoding, matrix parameters, stripped tabs, backslashes) is refused.
@@ -76,6 +152,39 @@ function walk(value, visit, key = "", depth = 0) {
 }
 const collect = found => (key, value) => { if (typeof value === "string" && !SAFE_ID_KEYS.has(key.toLowerCase())) ids(value, found); };
 
+// Element references as tab read needs (any branch). `dids` is the document scope:
+// an object's documentId/documentIdSource/did, else the enclosing scope (the request's document).
+// A reference with no document in scope is refused. Depth is bounded by walk() beforehand.
+function references(value, dids, out) {
+  const add = (did, eid) => {
+    if (!did) throw new Error("Element reference names no document id; refused.");
+    out.push(tab(did, null, eid.toLowerCase(), "read"));
+  };
+  const text = s => {
+    const named = new Set();
+    for (const m of s.matchAll(NAMESPACE)) { add(m[1].toLowerCase(), m[2]); named.add(m[2].toLowerCase()); }
+    for (const m of s.matchAll(ELEMENT)) if (!named.has(m[1].toLowerCase())) for (const did of dids) add(did, m[1]);
+  };
+  if (typeof value === "string") return text(value);
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) { for (const item of value) references(item, dids, out); return; }
+  const entries = Object.entries(value);
+  const docs = new Set();
+  for (const [k, v] of entries) if (DOCUMENT_KEYS.includes(k.toLowerCase())) walk(v, (_, s) => { if (typeof s === "string") ids(s, docs); });
+  const scope = docs.size ? [...docs] : dids;
+  if (!scope.length) scope.push(null);
+  for (const [k, v] of entries) {
+    text(k);
+    if (ELEMENT_KEYS.has(k.toLowerCase())) {
+      // Strings, comma lists and arrays of them; nested objects get their own scope below.
+      const eids = new Set();
+      for (const s of [v].flat(Infinity)) if (typeof s === "string") ids(s, eids);
+      for (const eid of eids) for (const did of scope) add(did, eid);
+    }
+    references(v, scope, out);
+  }
+}
+
 // Text parts of a multipart body as {name: [values]}; file parts are opaque data.
 // Raw bodies of any other type cannot be inspected and are refused.
 function formFields(job) {
@@ -100,84 +209,190 @@ function formFields(job) {
   return fields;
 }
 
-export function classify(job) {
-  if (job?.kind === "tabs") return {dids: [], admin: false};
-  if (["native", "state", "schema", "open", "ui_inspect", "ui_action", "display"].includes(job?.kind)) {
-    if (!HEX.test(job.target?.did ?? "")) throw new Error("Command has no valid target document id.");
-    const dids = new Set([job.target.did.toLowerCase()]);
-    if (job.kind === "native") walk(job.body, collect(dids));
-    return {dids: [...dids], admin: false};
-  }
-  if (job?.kind !== "rest" || typeof job.path !== "string") throw new Error("Unclassifiable command refused.");
-  const segs = segments(job.path);
-  const rest = segs.slice(segs[1] && /^v\d+$/.test(segs[1]) ? 2 : 1);
-  const dids = new Set();
-  // translatorFormats/{did}/{wv}/{wvid}/{eid} has a bare element id.
-  segs.forEach((s, i) => { if (!NOT_DID_AFTER.has(segs[i - 1]) && segs[i - 4] !== "translatorformats") ids(s, dids); });
-  const pathNamesDocument = dids.size > 0;
-  const write = job.method !== "GET";
-  let reason;
-  const visit = collect(dids);
-  for (const value of write ? [job.query, job.body, job.body_base64 != null ? formFields(job) : null] : [job.query])
-    walk(value, (key, v) => { visit(key, v); if (write && !reason && ADMIN_FIELD.test(key) && !unset(v)) reason = `${key} field`; });
-  // The comments collection is scoped by the document id in its query or body.
-  if (!pathNamesDocument && !NO_DOCUMENT.some(([method, pattern]) => method === job.method && pattern.test(rest.join("/"))) &&
-      !(rest.join("/") === "comments" && dids.size))
-    throw new Error(`API path names no document id and is not allowlisted: ${job.method} ${job.path.slice(0, 120)}. Use a document-scoped endpoint.`);
-  const segment = rest.find(s => ADMIN_SEGMENTS.has(s));
-  if (segment) reason = `${segment} endpoint`;
-  else if (job.method === "DELETE" && /^documents\/(?:d\/)?[0-9a-f]{24}$/.test(rest.join("/"))) reason = "document deletion";
-  return {dids: [...dids], admin: !!reason, ...(reason ? {reason} : {})};
+// A translation stored in the document creates a tab; anything but an explicit false stores.
+const storesInDocument = values => values.some(v => plain(v) && Object.entries(v).some(([k, x]) =>
+  k.toLowerCase() === "storeindocument" && ![undefined, null, false, "false"].includes(Array.isArray(x) ? x[0] : x)));
+
+const refused = (job, why) => new Error(`${why}: ${job.method} ${job.path.slice(0, 120)}.`);
+
+// Needs of an element path …/d/{did}/[{w|v|m}/{id}/]e/{eid}/{tail}.
+function elementNeeds(job, rest, values) {
+  const m = rest.match(new RegExp(`^(?:[^/]+/)*?d/${H}/(?:([wvm])/${H}/)?e/${H}(?:/(.*))?$`));
+  if (!m) return null;
+  const [, did, wvm, id, eid, tail = ""] = m;
+  const wid = wvm === "w" ? id : null;
+  const post = job.method === "POST";
+  if (job.method === "GET") return [tab(did, wid, eid, "read")];
+  // Without a branch segment only configuration encoding is a read-only POST.
+  if (post && (wvm ? READ_POSTS.test(tail) : rest === `elements/d/${did}/e/${eid}/configurationencodings`) &&
+      !(tail === "translations" && storesInDocument(values))) return [tab(did, wid, eid, "read")];
+  if (!wid) throw refused(job, "Writes are only allowed in a workspace (/w/) branch; versions and microversions are read-only");
+  if (job.method === "DELETE" && rest === `elements/d/${did}/w/${wid}/e/${eid}`) return [tab(did, wid, eid, "write"), action(did, "tabs")];
+  if (post && rest === `assemblies/d/${did}/w/${wid}/e/${eid}/bomelement`) return [tab(did, wid, eid, "read"), action(did, "tabs")];
+  // Element metadata holds the tab name (renaming a tab); a stored translation creates a tab.
+  if (post && (rest === `metadata/d/${did}/w/${wid}/e/${eid}` || tail === "translations")) return [tab(did, wid, eid, "write"), action(did, "tabs")];
+  return [tab(did, wid, eid, "write")];
 }
 
-// Missing policy means nothing is authorized; a malformed one refuses everything.
-function checkPolicy(policy) {
-  if (policy === undefined) return {docs: {}, allow_untested_native: false, allow_ui_fallback: false};
-  if (!plain(policy) || !plain(policy.docs) || !Object.values(policy.docs).every(entryOk))
-    throw new Error("Extension document policy is malformed; ask the user to re-authorize documents in the Onshape Native popup.");
+function classifyTargeted(job) {
+  const {did, wid, eid} = job.target ?? {};
+  if (![did, wid, eid].every(id => typeof id === "string" && HEX.test(id))) throw new Error("Command has no valid target document, branch and tab id.");
+  const [d, w, e] = [did, wid, eid].map(id => id.toLowerCase());
+  const command = job.command;
+  if (job.kind === "native" && NATIVE_REFUSED.has(command)) throw new Error(`Native command ${String(command).slice(0, 80)} is refused: it changes the branch, versions or the document itself.`);
+  const mode = TARGETED[job.kind] ?? (NATIVE_READS.has(command) ? "read" : "write");
+  const needs = [tab(d, w, e, mode)];
+  if (job.kind === "native" && NATIVE_TABS.has(command)) needs.push(action(d, "tabs"));
+  if (job.kind === "native") {
+    const docs = new Set();
+    walk(job.body, collect(docs));
+    references(job.body, [d], needs);
+    for (const id of docs) needs.push(overview(id));
+  }
+  return {needs: finish(needs), admin: false};
+}
+
+// Dedupe; an overview is implied by any tab or branch need on the same document.
+// Order: tab/branch needs first (they file access requests), then overviews, then actions.
+function finish(needs) {
+  const covered = new Set(needs.filter(n => n.type === "tab" || n.type === "branch").map(n => n.did));
+  const seen = new Map();
+  for (const n of needs) if (!(n.type === "overview" && covered.has(n.did))) seen.set(JSON.stringify(n), n);
+  const rank = {tab: 0, branch: 0, overview: 1, action: 2};
+  return [...seen.values()].sort((a, b) => rank[a.type] - rank[b.type]);
+}
+
+export function classify(job) {
+  if (job?.kind === "tabs") return {needs: [], admin: false};
+  if (Object.hasOwn(TARGETED, job?.kind ?? "")) return classifyTargeted(job);
+  if (job?.kind !== "rest" || typeof job.path !== "string") throw new Error("Unclassifiable command refused.");
+  if (!METHODS.has(job.method)) throw new Error("Unsupported HTTP method refused.");
+  const segs = segments(job.path);
+  if (segs[0] !== "api") throw new Error("API paths start with /api/.");
+  const rest = segs.slice(segs[1] && /^v\d+$/.test(segs[1]) ? 2 : 1).join("/");
+  const pathDids = new Set();
+  // translatorFormats/{did}/{wv}/{wvid}/{eid} has a bare element id.
+  segs.forEach((s, i) => { if (!NOT_DID_AFTER.has(segs[i - 1]) && segs[i - 4] !== "translatorformats") ids(s, pathDids); });
+  const write = job.method !== "GET";
+  const values = write ? [job.query, job.body, job.body_base64 != null ? formFields(job) : null] : [job.query];
+  const docs = new Set();
+  let reason;
+  const visit = collect(docs);
+  for (const value of values)
+    walk(value, (key, v) => { visit(key, v); if (write && !reason && ADMIN_FIELD.test(key) && !unset(v)) reason = `${key} field`; });
+
+  let needs, critical, requestDid = null;
+  if (!pathDids.size) {
+    // The comments collection is scoped by the document id in its query or body.
+    if (!NO_DOCUMENT.some(([method, pattern]) => method === job.method && pattern.test(rest)) && !(rest === "comments" && docs.size))
+      throw new Error(`API path names no document id and is not allowlisted: ${job.method} ${job.path.slice(0, 120)}. Use a document-scoped endpoint.`);
+    needs = [];
+  } else {
+    // A second element in the path would be ignored by the rules below.
+    const elements = segs.filter((s, i) => s === "e" && HEX.test(segs[i + 1] ?? "")).length;
+    if (elements > 1) throw refused(job, "API route not classified (several elements)");
+    const formats = rest.match(new RegExp(`^elements/translatorformats/${H}/([wv])/${H}/${H}$`));
+    if (formats && job.method === "GET") needs = [tab(formats[1], formats[2] === "w" ? formats[3] : null, formats[4], "read")];
+    else needs = elementNeeds(job, rest, values);
+    requestDid = needs?.[0]?.did ?? null;
+    if (!needs) {
+      const route = DOC_ROUTES.map(r => r.method === job.method && [r, rest.match(r.pattern)]).find(x => x && x[1]);
+      if (route) {
+        const [r, match] = route;
+        needs = r.needs(...match.slice(1));
+        critical = r.critical ?? undefined;
+        requestDid = match[1];
+        if (r.admin && !reason) reason = r.admin;
+      } else if (!elements && (rest.split("/").some(s => ADMIN_SEGMENTS.has(s)) || (job.method === "DELETE" && /^documents\/(?:d\/)?[0-9a-f]{24}$/.test(rest)))) {
+        needs = [];  // admin-only routes: the admin action on every named document, below
+      } else throw refused(job, "API route not classified, refused by default");
+    }
+  }
+  const segment = rest.split("/").find(s => ADMIN_SEGMENTS.has(s));
+  if (segment) reason = `${segment} endpoint`;
+  else if (job.method === "DELETE" && /^documents\/(?:d\/)?[0-9a-f]{24}$/.test(rest)) reason = "document deletion";
+  // An approval is bound to the exact JSON request; raw bodies cannot be compared.
+  if (critical && job.body_base64 != null) throw refused(job, "Raw bodies are refused for merge/restore");
+
+  // Element references default to the request's document; without one, to every document the request names.
+  const scope = requestDid ? [requestDid] : pathDids.size ? [...pathDids] : [...docs];
+  for (const value of values) references(value, scope, needs);
+  for (const did of [...pathDids, ...docs]) needs.push(overview(did));
+  if (reason) for (const did of new Set(needs.map(n => n.did))) needs.push(action(did, "admin"));
+  return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {})};
+}
+
+// Thrown for an unmet tab/branch/action/approval need; the worker files a request from `need`.
+export class AccessError extends Error {
+  constructor(message, need) { super(message); this.name = "AccessError"; this.need = need; }
+}
+
+// Stable JSON (sorted keys) of what the server receives: an approval binds this exact request.
+const stable = v => Array.isArray(v) ? `[${v.map(stable).join(",")}]`
+  : plain(v) ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}`
+  : JSON.stringify(v ?? null);
+export const jobKey = job => stable({method: job.method ?? null, path: job.path ?? null, query: job.query ?? null, body: job.body ?? null});
+
+// authorize() takes the effective policy (effectivePolicy output). Anything else fails closed.
+function effective(policy) {
+  if (policy === undefined) return checkPolicy(undefined);
+  if (!plain(policy) || policy.version !== 2 || !plain(policy.docs) ||
+      !Object.values(policy.docs).every(d => plain(d) && plain(d.branches ?? {}) && plain(d.actions ?? {})))
+    throw new Error("Extension document policy is malformed; ask the user to re-authorize in the Onshape Native popup.");
   return policy;
 }
 
-// The popup writes "policy" and the worker writes only "created" (auto-authorized
-// new documents), so neither overwrites the other's edits. Popup entries win.
-export function effectivePolicy(policy, created = {}) {
-  const base = checkPolicy(policy);
-  if (!plain(created) || !Object.values(created).every(entryOk))
-    throw new Error("Extension created-document policy is malformed; ask the user to re-authorize documents in the Onshape Native popup.");
-  return {...base, docs: {...created, ...base.docs}};
-}
+const atLeast = (mode, need) => mode === "write" || (mode === "read" && need === "read");
 
-export function authorize(job, policy) {
-  const {docs, allow_ui_fallback} = checkPolicy(policy);
+export function authorize(job, policy, approvals = {}, consumed = [], now = Date.now()) {
+  const p = effective(policy);
   // Page controls are model text the worker cannot classify; off unless the user opts in.
-  if ((job?.kind === "ui_inspect" || job?.kind === "ui_action") && allow_ui_fallback !== true)
+  if ((job?.kind === "ui_inspect" || job?.kind === "ui_action") && p.allow_ui_fallback !== true)
     throw new Error('UI fallback is disabled. Ask the user to enable "Advanced: allow UI fallback clicks" in the extension popup.');
-  const {dids, admin, reason} = classify(job);
-  for (const did of dids) if (!Object.hasOwn(docs, did)) throw new Error(`Document ${did} is not authorized. ${ASK}`);
-  if (admin && !dids.length) throw new Error(`Admin action (${reason}) refused: it names no authorized document.`);
-  if (admin) for (const did of dids) if (docs[did].admin !== true)
-    throw new Error(`Admin action (${reason}) on document ${did} refused. Ask the user to enable "Allow admin actions" for it in the extension popup.`);
-  return {dids, admin};
+  const {needs, admin, reason, critical} = classify(job);
+  if (admin && !needs.length) throw new Error(`Admin action (${reason}) refused: it names no authorized document.`);
+  for (const need of needs) {
+    const {did, type, wid, eid, mode} = need;
+    if (type === "tab" && !atLeast(wid ? tabMode(p, did, wid, eid) : anyBranchMode(p, did, eid), mode))
+      throw new AccessError(`No ${mode} access to tab ${eid} in ${wid ? `branch ${wid}` : "any branch"} of document ${did}. ${FILED}`, need);
+    if (type === "branch" && !atLeast(branchMode(p, did, wid), mode))
+      throw new AccessError(`No ${mode} access to the whole branch ${wid} of document ${did}. Ask the user to grant it in the Onshape Native popup ("Whole document in this branch").`, need);
+    if (type === "overview" && !hasAnyGrant(p, did)) throw new Error(`Document ${did} is not authorized. ${ASK}`);
+    if (type === "action" && !actionOn(p, did, need.action)) {
+      if (need.action === "admin") throw new AccessError(`Admin action (${reason}) on document ${did} refused. Ask the user to enable the "admin" document action for it in the Onshape Native popup.`, need);
+      throw new AccessError(`Document action "${need.action}" is off for ${did}. Ask the user to enable it in the popup (Document actions).`, need);
+    }
+  }
+  if (!critical) return {needs};
+  // Merge/restore overwrite work: one popup approval per exact request, used once, before it expires.
+  const key = jobKey(job);
+  const expires = plain(approvals) && Object.hasOwn(approvals, key) ? approvals[key] : undefined;
+  if (!(typeof expires === "number" && expires > now) || !Array.isArray(consumed) || consumed.includes(key)) {
+    const did = needs.find(n => n.type === "branch").did;
+    throw new AccessError(`The ${critical} needs a one-time approval: ask the user to approve this exact ${critical} in the Onshape Native popup, then retry the same request.`,
+      {did, type: "approval", critical, key});
+  }
+  return {needs, approvalKey: key};
 }
 
 // Returns the job the extension executes: trust fields come only from policy.
-export function applyPolicy(job, policy) {
-  const {dids} = authorize(job, policy);
-  const {docs, allow_untested_native} = checkPolicy(policy);
-  return {...job, admin_allowed: dids.length > 0 && dids.every(did => docs[did].admin === true),
-          allow_untested_native: allow_untested_native === true};
+export function applyPolicy(job, policy, approvals = {}, consumed = [], now = Date.now()) {
+  const {needs} = authorize(job, policy, approvals, consumed, now);
+  const p = effective(policy);
+  const dids = [...new Set(needs.map(n => n.did))];
+  return {...job, admin_allowed: dids.length > 0 && dids.every(did => actionOn(p, did, "admin")),
+          allow_untested_native: p.allow_untested_native === true};
 }
 
 // After a successful create/copy, returns the new "created" map authorizing the
-// new document (never admin), or null.
+// new document (never admin), or null. (v1 output; Task 4 moves it to created.docs/grants.)
 export function recordCreated(job, result, policy, created = {}, now = Date.now()) {
   if (job.kind !== "rest" || job.method === "GET" || !(result?.status >= 200 && result.status < 300)) return null;
   const segs = segments(job.path);
   const rest = segs.slice(segs[1] && /^v\d+$/.test(segs[1]) ? 2 : 1).join("/");
   const copy = rest.match(/^documents\/([0-9a-f]{24})\/workspaces\/[0-9a-f]{24}\/copy$/);
   if (!(job.method === "POST" && (rest === "documents" || copy))) return null;
-  const {docs} = effectivePolicy(policy, created);
-  if (copy && !Object.hasOwn(docs, copy[1])) return null;
+  if (copy && !hasAnyGrant(effectivePolicy(policy, created), copy[1])) return null;
   const id = result.body?.newDocumentId ?? result.body?.id;
   if (typeof id !== "string" || !HEX.test(id)) return null;
   const name = docName(result.body?.newDocumentName ?? result.body?.name);
