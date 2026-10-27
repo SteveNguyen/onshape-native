@@ -7,7 +7,7 @@ const {bridgeSession} = await import('../extension/handshake.js');
 const TOKEN = 'pairing-token-'.repeat(4);
 const SERVER_NONCE = 'a'.repeat(32);
 const mac = (token, message) => createHmac('sha256', token).update(message).digest('hex');
-const info = {version: '0.5.0', capabilities: ['policy_v1']};
+const info = {version: '0.5.0', capabilities: ['policy_v2']};
 const command = {type: 'command', id: '1', job: {kind: 'tabs'}};
 
 function socket() {

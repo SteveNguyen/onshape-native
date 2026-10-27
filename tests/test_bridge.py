@@ -206,7 +206,7 @@ async def test_timeout_is_not_replayed_and_late_result_cannot_resolve_next_comma
     assert await task == {"tabs": []}
 
 
-async def test_extension_without_policy_v1_only_lists_tabs():
+async def test_extension_without_policy_v2_only_lists_tabs():
     broker = Broker(CONFIG)
     class Connection:
         sent = []
@@ -215,11 +215,11 @@ async def test_extension_without_policy_v1_only_lists_tabs():
     broker.extension = Connection()
     broker.extension_info = {"version": "0.4.0", "capabilities": ["tab_context_v1", "display_v1"]}
     for job in [{"kind": "state", "target": TARGET}, {"kind": "rest", "method": "GET", "path": "/api/v6/documents/" + "a"*24}]:
-        with pytest.raises(BridgeError, match="policy_v1.*[Rr]eload"):
+        with pytest.raises(BridgeError, match="Extension policy is outdated; reload the Onshape Native extension \\(needs policy_v2\\)\\."):
             await broker.dispatch(job)
     assert not broker.extension.sent
     assert await broker.dispatch({"kind": "tabs"}) == {"ok": True}
-    broker.extension_info["capabilities"].append("policy_v1")
+    broker.extension_info["capabilities"].append("policy_v2")
     assert await broker.dispatch({"kind": "state", "target": TARGET}) == {"ok": True}
 
 
@@ -248,13 +248,13 @@ def test_websocket_requires_extension_origin_and_mutual_hmac():
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect("/extension", headers={"origin": "https://evil.example"}): pass
         with client.websocket_connect("/extension", headers=ORIGIN) as ws:
-            server_nonce, ext_nonce = handshake(ws, version="0.5.0", capabilities=["policy_v1"])
+            server_nonce, ext_nonce = handshake(ws, version="0.6.0", capabilities=["policy_v2"])
             ready = ws.receive_json()
             # The bridge proves it holds the token without revealing it.
             assert ready == {"type": "ready", "protocol": 2, "mac": mac(CONFIG["token"], f"srv\n{ext_nonce}\n{server_nonce}")}
             assert CONFIG["token"] not in json.dumps(ready)
             health = client.get("/health", auth=AUTH).json()
-            assert health["extension_connected"] is True and health["extension"]["capabilities"] == ["policy_v1"]
+            assert health["extension_connected"] is True and health["extension"]["capabilities"] == ["policy_v2"]
             with client.websocket_connect("/extension", headers=ORIGIN) as second:  # single extension
                 handshake(second)
                 with pytest.raises(WebSocketDisconnect): second.receive_json()
@@ -384,7 +384,7 @@ async def test_signed_export_download_never_forwards_bridge_credentials(monkeypa
     class Extension:
         async def send_json(self,data):
             broker.pending[data['id']].set_result({'status':307,'download_redirect':f'https://{host}/export?signature=sample'})
-    broker.extension=Extension();broker.extension_info={'version':'0.5.0','capabilities':['policy_v1']}
+    broker.extension=Extension();broker.extension_info={'version':'0.6.0','capabilities':['policy_v2']}
     result=await broker.dispatch({'kind':'rest','method':'GET','path':'/api/v17/partstudios/sample/stl'})
     assert base64.b64decode(result['body'])==b'binary-stl' and len(seen)==1
 
@@ -395,7 +395,7 @@ async def test_export_redirect_cannot_access_arbitrary_hosts(url):
     broker=Broker(CONFIG)
     class Extension:
         async def send_json(self,data):broker.pending[data['id']].set_result({'status':307,'download_redirect':url})
-    broker.extension=Extension();broker.extension_info={'version':'0.5.0','capabilities':['policy_v1']}
+    broker.extension=Extension();broker.extension_info={'version':'0.6.0','capabilities':['policy_v2']}
     with pytest.raises(BridgeError):
         await broker.dispatch({'kind':'rest','method':'GET','path':'/api/v17/partstudios/sample/stl'})
 
@@ -407,7 +407,7 @@ async def test_export_storage_error_names_host_but_not_signed_url(monkeypatch):
     class Extension:
         async def send_json(self,data):
             broker.pending[data['id']].set_result({'status':307,'download_redirect':'https://bucket.s3.amazonaws.com/export?signature=secret'})
-    broker.extension=Extension();broker.extension_info={'version':'0.5.0','capabilities':['policy_v1']}
+    broker.extension=Extension();broker.extension_info={'version':'0.6.0','capabilities':['policy_v2']}
     with pytest.raises(BridgeError) as error:
         await broker.dispatch({'kind':'rest','method':'GET','path':'/api/v17/partstudios/sample/stl'})
     assert 'bucket.s3.amazonaws.com' in str(error.value) and '401' in str(error.value) and 'secret' not in str(error.value)
@@ -421,7 +421,7 @@ async def test_regional_export_host_refusal_points_to_translation(monkeypatch,st
     class Extension:
         async def send_json(self,data):
             broker.pending[data['id']].set_result({'status':307,'download_redirect':'https://cad-usw2.onshape.com/api/export?signature=secret'})
-    broker.extension=Extension();broker.extension_info={'version':'0.5.0','capabilities':['policy_v1']}
+    broker.extension=Extension();broker.extension_info={'version':'0.6.0','capabilities':['policy_v2']}
     with pytest.raises(BridgeError) as error:
         await broker.dispatch({'kind':'rest','method':'GET','path':'/api/v17/partstudios/sample/stl'})
     assert str(status) in str(error.value) and 'translation' in str(error.value) and 'formatName' in str(error.value) and 'secret' not in str(error.value)

@@ -3,7 +3,8 @@ import {restGet} from "./rest-get.js";
 import {tabContext} from "./tab-context.js";
 import {displayCommand} from "./display-adapter.js";
 import {BRIDGE_TOKEN} from "./local-config.js";
-import {applyPolicy, effectivePolicy, recordCreated} from "./policy.js";
+import {AccessError, authorize, applyPolicy, effectivePolicy, recordCreated} from "./policy.js";
+import {badgeFor, describeJob, fileRequest, pruneApprovals} from "./requests.js";
 import {bridgeSession} from "./handshake.js";
 
 let socket = null;
@@ -30,17 +31,56 @@ async function resolveTab(job) {
   return selected;
 }
 
-async function stored() { return chrome.storage.local.get(["policy", "created"]); }
+async function stored() { return chrome.storage.local.get(["policy", "created", "requests", "approvals", "consumed"]); }
+
+const connected = () => !!socket && verified === socket && socket.readyState === WebSocket.OPEN;
+
+// Live request count (orange) wins over ON/OFF; the popup's Allow/Deny changes "requests" in storage.
+async function refreshBadge() {
+  const {requests} = await chrome.storage.local.get("requests");
+  const badge = badgeFor(requests, Date.now(), connected());
+  chrome.action.setBadgeText({text: badge.text});
+  chrome.action.setBadgeBackgroundColor({color: badge.color ?? "#4b5563"});
+}
+
+// A refused agent call becomes a popup request for exactly the missing need. Never masks the refusal.
+async function fileAccessRequest(job, error) {
+  try {
+    const now = Date.now();
+    const {requests} = await chrome.storage.local.get("requests");
+    const need = error.need;
+    await chrome.storage.local.set({requests: fileRequest(requests, need, now, need?.type === "approval" ? describeJob(job) : undefined)});
+    await refreshBadge();
+  } catch { /* the bridge still gets the original error */ }
+}
 
 async function execute(job) {
   // The popup-managed policy is authoritative; bridge-supplied trust fields are overwritten.
-  const {policy, created} = await stored();
+  const {policy, created, approvals: rawApprovals, consumed: rawConsumed} = await stored();
   const current = effectivePolicy(policy, created);
-  job = applyPolicy(job, current);
+  const now = Date.now();
+  const {approvals, consumed} = pruneApprovals(rawApprovals, rawConsumed, now);
+  const original = job;
+  let approvalKey;
+  try {
+    ({approvalKey} = authorize(job, current, approvals, consumed, now));
+    job = applyPolicy(job, current, approvals, consumed, now);
+  } catch (error) {
+    if (error instanceof AccessError) await fileAccessRequest(original, error);
+    throw error;
+  }
   const result = await run(job, current);
+  // The worker writes only "created", "requests", "consumed", never the popup's "policy"/"approvals".
+  // Re-read so a concurrent popup change is kept; commands are already serialized by inFlight.
+  if (approvalKey) {
+    const latest = await stored();
+    const used = latest.approvals?.[approvalKey];
+    if (typeof used === "number") {
+      const kept = pruneApprovals(latest.approvals, latest.consumed, Date.now()).consumed;
+      await chrome.storage.local.set({consumed: {...kept, [approvalKey]: used}});
+    }
+  }
   if (job.kind === "rest" && job.method !== "GET") {
-    // The worker writes only "created", never the popup's "policy". Re-read so a
-    // concurrent popup revoke is kept; commands are already serialized by inFlight.
     const latest = await stored();
     const updated = recordCreated(job, result, latest.policy, latest.created);
     if (updated) await chrome.storage.local.set({created: updated});
@@ -75,14 +115,14 @@ async function connect() {
   socket = current;
   // The bridge sends a challenge on accept; nothing runs until it proves the token.
   const receive = bridgeSession(current, BRIDGE_TOKEN, {version:chrome.runtime.getManifest().version,
-    capabilities:["tab_context_v1", "assembly_sidebar_map_v1", "display_v1", "policy_v1"]});
+    capabilities:["tab_context_v1", "assembly_sidebar_map_v1", "display_v1", "policy_v2"]});
   current.onmessage = async event => {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
     message = await receive(message);
     if (message?.type === "ready") {
-      chrome.action.setBadgeText({text: "ON"});
       verified = current;
+      refreshBadge();
       clearInterval(heartbeat);
       heartbeat = setInterval(() => { if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({type: "ping"})); }, 20000);
       return;
@@ -104,14 +144,15 @@ async function connect() {
   };
   current.onclose = () => {
     if (socket !== current) return;
-    socket = null; clearInterval(heartbeat); chrome.action.setBadgeText({text: "OFF"});
+    socket = null; clearInterval(heartbeat); refreshBadge();
   };
   current.onerror = () => current.close();
 }
 
 chrome.alarms.create("native-reconnect", {periodInMinutes: .5});
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "native-reconnect") connect(); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "native-reconnect") { connect(); refreshBadge(); } });  // refresh also drops expired requests from the badge
 chrome.runtime.onStartup.addListener(connect);
+chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.requests) refreshBadge(); });
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   // Only this extension's popup can manage its connection; no page messaging.
   if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) return;
@@ -119,7 +160,15 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (socket) socket.close(); socket = null;
     connect().then(() => reply({ok: true})); return true;
   }
-  if (message.type === "status") reply({connected: !!socket && verified === socket && socket.readyState === WebSocket.OPEN});
+  if (message.type === "status") reply({connected: connected()});
+  if (message.type === "resolve_request") {
+    // The popup's Allow/Deny: the worker is the single writer of "requests", so it deletes the entry.
+    chrome.storage.local.get("requests").then(({requests}) => {
+      const {[message.id]: _gone, ...rest} = requests ?? {};
+      return typeof message.id === "string" ? chrome.storage.local.set({requests: rest}) : null;
+    }).then(() => reply({ok: true}));
+    return true;
+  }
   if (message.type === "disconnect") {
     if (socket) socket.close(); socket = null; clearInterval(heartbeat); reply({ok: true});
   }

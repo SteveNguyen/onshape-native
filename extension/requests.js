@@ -99,3 +99,9 @@ export function pruneApprovals(approvals, consumed, now) {
   const kept = Object.fromEntries(Object.entries(plain(approvals) ? approvals : {}).filter(([, exp]) => typeof exp === "number" && exp > now));
   return {approvals: kept, consumed: Object.fromEntries(Object.entries(plain(consumed) ? consumed : {}).filter(([k, exp]) => kept[k] === exp))};
 }
+
+// Badge for the action icon: live request count (orange) wins over the connection state.
+export function badgeFor(requests, now, connected) {
+  const n = live(requests, now).length;
+  return n > 0 ? {text: String(n), color: "#d97706"} : {text: connected ? "ON" : "OFF"};
+}

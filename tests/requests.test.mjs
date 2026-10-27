@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {fileRequest, liveRequests, approve, approveOnce, pruneApprovals, describeJob} from "../extension/requests.js";
+import {fileRequest, liveRequests, approve, approveOnce, pruneApprovals, describeJob, badgeFor} from "../extension/requests.js";
 import {tabMode, branchMode, actionOn, hasAnyGrant} from "../extension/grants.js";
 import {authorize, AccessError, jobKey} from "../extension/policy.js";
 
@@ -191,4 +191,11 @@ test("approveOnce never reuses an expiry and approve tolerates non-string ids", 
     const r = approve(p0, {id: "x", need}, {did: D, wid: W});
     assert.deepEqual([r.ok, r.reason, r.policy], [false, "Malformed request.", p0]);
   }
+});
+
+test("badgeFor shows the live request count in orange, else ON/OFF", () => {
+  const now = 10 * H, r = {x: {last_seen: now - 1}, y: {last_seen: now - H - 1}};
+  assert.deepEqual(badgeFor(r, now, true), {text: "1", color: "#d97706"});
+  assert.deepEqual(badgeFor({}, now, true), {text: "ON"});
+  assert.deepEqual(badgeFor(undefined, now, false), {text: "OFF"});
 });

@@ -57,9 +57,9 @@ def test_loaded_extension_capabilities_reported_and_old_workers_rejected():
     client=TestClient(create_app(config),base_url="http://127.0.0.1:8766");auth=BridgeAuth(config['token'])
     with client.websocket_connect('/extension',headers={'origin':'chrome-extension://'+'a'*32}) as ws:
         nonce=ws.receive_json()['nonce']
-        ws.send_json({'type':'hello','nonce':'e'*32,'mac':mac(config['token'],f"ext\n{nonce}\n{'e'*32}"),'capabilities':['policy_v1']});ws.receive_json()
+        ws.send_json({'type':'hello','nonce':'e'*32,'mac':mac(config['token'],f"ext\n{nonce}\n{'e'*32}"),'capabilities':['policy_v2']});ws.receive_json()
         state=client.get('/health',auth=auth).json()
-        assert state['extension']=={'version':'unknown','capabilities':['policy_v1']}
+        assert state['extension']=={'version':'unknown','capabilities':['policy_v2']}
         response=client.post('/command',auth=auth,json=job('inspect',{}))
         assert response.status_code==400
         assert 'display_v1' in response.json()['error']

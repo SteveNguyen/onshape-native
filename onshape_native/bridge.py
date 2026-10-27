@@ -125,8 +125,8 @@ class Broker:
                 raise BridgeError("Extension disconnected. Connect Onshape Native in Comet.")
             capabilities = (self.extension_info or {}).get("capabilities", [])
             # Document scoping lives in the extension; an older one cannot enforce it.
-            if job.get("kind") != "tabs" and "policy_v1" not in capabilities:
-                raise BridgeError("Loaded extension lacks policy_v1 document scoping. Reload the Onshape Native extension (version 0.5.0); check bridge_status.")
+            if job.get("kind") != "tabs" and "policy_v2" not in capabilities:
+                raise BridgeError("Extension policy is outdated; reload the Onshape Native extension (needs policy_v2).")
             if job.get("kind") == "display" and "display_v1" not in capabilities:
                 raise BridgeError("Loaded extension lacks display_v1. Update/reload version 0.5.0; check bridge_status.")
             command_id = secrets.token_hex(16)
