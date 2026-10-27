@@ -25,5 +25,24 @@
     {"check": "merge still off", "expected": "refused", "result": "refused"}
   ],
   "popup": "reviewed by the user: looks good",
-  "not_covered": ["merge/restore one-shot approval end to end", "real second branch (a non-granted workspace id was used)", "Pollen account"]
+  "modeling_session": {
+    "grants": "Custom: Write on Part Studio 'test_claudeA', Read on 'Part Studio 1'; later Write on Assembly 1; all advanced switches off (including allow_create_documents)",
+    "tools": "resolve_target, document_tree, inspect_model, feature, evaluate, render_views, view_control, capture_viewport and REST through the bridge",
+    "checks": [
+      {"check": "sketch circle r=10 mm on Top + extrude 10 mm (new body) in the granted Part Studio", "result": "allowed; body volume 3141.6 mm3 (pi*10^2*10), section area 314.2 mm2"},
+      {"check": "render_views and editor section view (origin center) + capture + section_off", "result": "allowed; verified, restored"},
+      {"check": "inspect read-only Part Studio 1", "result": "allowed"},
+      {"check": "add a feature to read-only Part Studio 1 via the feature tool", "result": "refused (no write access); Part Studio 1 unchanged"},
+      {"check": "list or insert into Assembly 1 without a grant", "result": "refused + request"},
+      {"check": "with Write on Assembly 1: insert Part Studio 1 part, two mate connectors, fastened mate", "result": "allowed; mate OK, new part at z=50 mm on top of part 2"},
+      {"check": "create branch with Create branches on", "result": "allowed; new branch inherited the tab grants"},
+      {"check": "edit test_claudeA in the new branch", "result": "allowed"},
+      {"check": "merge without whole-branch write on main", "result": "refused + request"},
+      {"check": "merge with merge switch, whole-branch write on main and whole-branch read on the source branch, no approval", "result": "refused: needs one-time approval"},
+      {"check": "merge after 'Approve once'", "result": "allowed; change present in main"},
+      {"check": "identical merge again", "result": "refused: approval already used"}
+    ],
+    "cleanup": "all test features, connectors, mate and instance deleted; Part Studio back to Import 1 in both branches; branch 'tabscope merge test' left for the user to delete in Onshape (the plugin cannot delete branches)"
+  },
+  "not_covered": ["restore one-shot approval end to end", "Pollen account"]
 }
