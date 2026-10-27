@@ -179,17 +179,28 @@ function references(value, dids, out) {
   if (value === null || typeof value !== "object") return;
   if (Array.isArray(value)) { for (const item of value) references(item, dids, out); return; }
   const entries = Object.entries(value);
-  const docs = new Set();
-  for (const [k, v] of entries) if (DOCUMENT_KEYS.includes(k.toLowerCase())) walk(v, (_, s) => { if (typeof s === "string") ids(s, docs); });
-  const scope = docs.size ? [...docs] : dids;
+  // Document keys: documentId/documentIdSource/did (generic) and any "<prefix>DocumentId" (targetDocumentId, …).
+  const docs = new Set(), byPrefix = new Map();
+  const tokens = (v, found) => walk(v, (_, s) => { if (typeof s === "string") ids(s, found); });
+  for (const [k, v] of entries) {
+    const key = k.toLowerCase();
+    if (DOCUMENT_KEYS.includes(key)) tokens(v, docs);
+    else if (key.endsWith("documentid")) { const p = key.slice(0, -"documentid".length); byPrefix.set(p, byPrefix.get(p) ?? new Set()); tokens(v, byPrefix.get(p)); }
+  }
+  const prefixed = [...byPrefix.values()].flatMap(s => [...s]);
+  // Nested values and namespaces: the generic document, else every document this object or its parent names.
+  const scope = docs.size ? [...docs] : [...new Set([...prefixed, ...dids])].filter(Boolean);
   if (!scope.length) scope.push(null);
   for (const [k, v] of entries) {
     text(k);
     if (isElementKey(k)) {
+      // "<prefix>ElementId(s)" belongs to "<prefix>DocumentId", else the generic document, else the enclosing one.
+      const own = byPrefix.get(k.toLowerCase().split("elementid")[0]);
+      const where = own?.size ? [...own] : docs.size ? [...docs] : dids.length ? dids : [null];
       // Strings, comma lists and arrays of them; nested objects get their own scope below.
       const eids = new Set();
       for (const s of [v].flat(Infinity)) if (typeof s === "string") ids(s, eids);
-      for (const eid of eids) for (const did of scope) add(did, eid);
+      for (const eid of eids) for (const did of where) add(did, eid);
     }
     references(v, scope, out);
   }
@@ -248,8 +259,10 @@ function elementNeeds(job, rest, values) {
   if (job.method === "DELETE" && rest === `elements/d/${did}/w/${wid}/e/${eid}`) return [tab(did, wid, eid, "write"), action(did, "tabs")];
   if (post && rest === `assemblies/d/${did}/w/${wid}/e/${eid}/bomelement`)
     return [tab(did, wid, eid, "read"), branchWrite(did, wid), action(did, "tabs")];
-  // Element metadata holds the tab name (renaming a tab); a stored export/translation creates a tab.
-  if (post && (rest === `metadata/d/${did}/w/${wid}/e/${eid}` || stored)) return [tab(did, wid, eid, "write"), action(did, "tabs")];
+  // Element metadata holds the tab name (renaming a tab); a stored export/translation, or a blob update
+  // stored in the document (it may translate into a new tab), creates a tab.
+  if (post && (rest === `metadata/d/${did}/w/${wid}/e/${eid}` || stored ||
+      (rest === `blobelements/d/${did}/w/${wid}/e/${eid}` && storesInDocument(values)))) return [tab(did, wid, eid, "write"), action(did, "tabs")];
   return [tab(did, wid, eid, "write")];
 }
 
@@ -280,7 +293,10 @@ function classifyTargeted(job) {
 function finish(needs) {
   const covered = new Set(needs.filter(n => ["tab", "branch", "branch_write"].includes(n.type)).map(n => n.did));
   const seen = new Map();
-  for (const n of needs) if (!(n.type === "overview" && covered.has(n.did))) seen.set(JSON.stringify(n), n);
+  // A tab read is implied by a write on the same tab in the same branch, or in any branch when the read is branch-free.
+  const implied = n => n.type === "tab" && n.mode === "read" && needs.some(m =>
+    m.type === "tab" && m.mode === "write" && m.did === n.did && m.eid === n.eid && (n.wid === null || m.wid === n.wid));
+  for (const n of needs) if (!(n.type === "overview" && covered.has(n.did)) && !implied(n)) seen.set(JSON.stringify(n), n);
   const rank = {tab: 0, branch: 0, branch_write: 0, overview: 1, action: 2};
   return [...seen.values()].sort((a, b) => rank[a.type] - rank[b.type]);
 }
@@ -341,11 +357,19 @@ export function classify(job) {
   const scope = requestDid ? [requestDid] : pathDids.size ? [...pathDids] : [...docs];
   const refs = [];
   for (const value of values) references(value, scope, refs);
+  needs.push(...refs);
   if (rest === "comments") {
-    // Comments belong to a tab, not a branch: reading needs read on that tab, writing needs write (any branch).
-    if (!refs.length) throw refused(job, "Comments need the element id of a granted tab");
-    needs.push(...refs.map(r => write ? tab(r.did, null, r.eid, "write") : r));
-  } else needs.push(...refs);
+    // Comments belong to a tab, not a branch: the comment's own top-level documentId/did and elementId
+    // (body for writes, query for reads) need write (any branch) to post and read to list.
+    const top = write ? job.body : job.query;
+    const field = names => (plain(top) ? Object.entries(top) : []).filter(([k]) => names.includes(k.toLowerCase()))
+      .flatMap(([, v]) => [v].flat()).filter(s => typeof s === "string");
+    const dids = new Set(), eids = new Set();
+    for (const s of field(["documentid", "did"])) ids(s, dids);
+    for (const s of field(write ? ["elementid"] : ["elementid", "eid"])) ids(s, eids);
+    if (!dids.size || !eids.size) throw refused(job, "Comments need the top-level document and element id of a granted tab");
+    for (const did of dids) for (const eid of eids) needs.push(tab(did, null, eid, write ? "write" : "read"));
+  }
   for (const did of [...pathDids, ...docs]) needs.push(overview(did));
   if (reason) for (const did of new Set(needs.map(n => n.did))) needs.push(action(did, "admin"));
   return {needs: finish(needs), admin: !!reason, ...(reason ? {reason} : {}), ...(critical ? {critical} : {})};

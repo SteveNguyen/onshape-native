@@ -375,6 +375,11 @@ test('read-only POSTs are reads', () => {
   needs(rest(tr, 'POST', {body: {storeInDocument: ['false', 'true']}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
   needs(rest(tr, 'POST', {body: {storeInDocument: ['false', false]}}), [tab(A, W, E, 'read')]);
   needs(rest(tr, 'POST', form([['storeInDocument', 'false'], ['storeInDocument', 'true']])), [tab(A, W, E, 'write'), action(A, 'tabs')]);
+  // Updating a blob tab with storeInDocument may create a tab.
+  const blob = `/api/v6/blobelements/d/${A}/w/${W}/e/${E}`;
+  needs(rest(blob, 'POST', {body: {storeInDocument: true}}), [tab(A, W, E, 'write'), action(A, 'tabs')]);
+  needs(rest(blob, 'POST', form([['storeInDocument', 'true']], [['file', 'x']])), [tab(A, W, E, 'write'), action(A, 'tabs')]);
+  needs(rest(blob, 'POST', form([['storeInDocument', 'false']], [['file', 'x']])), [tab(A, W, E, 'write')]);
   // Every exporting read-only POST stores into the document the same way, for parts studios and assemblies.
   for (const kind of ['partstudios', 'assemblies']) for (const tail of ['export', 'export/step', 'export/gltf', 'export/obj', 'translations']) {
     needs(rest(`/api/v6/${kind}/d/${A}/w/${W}/e/${E}/${tail}`, 'POST', {body: {storeInDocument: true}}), [tab(A, W, E, 'write'), action(A, 'tabs')], `${kind} ${tail}`);
@@ -633,6 +638,34 @@ test('comments need tab access on the referenced element', () => {
   allowed(rest('/api/v6/comments', 'GET', {query: {did: A, eid: E2}}), p);
   refused(rest('/api/v6/comments', 'GET', {query: {did: A, eid: C}}), new RegExp(`No read access to tab ${C}`), p);
   for (const query of [{did: A}, {documentId: A}]) refused(rest('/api/v6/comments', 'GET', {query}), /element/, p);
+  // The element must be a top-level field of the comment (or query), never only nested.
+  refused(rest('/api/v6/comments', 'POST', {body: {documentId: A, message: 'hi', extra: {elementId: E}}}), /element/, p);
+  refused(rest('/api/v6/comments', 'POST', {body: {documentId: A, message: `see e${E}`}}), /element/, p);
+  refused(rest('/api/v6/comments', 'GET', {query: {did: A, filter: {eid: E}}}), /element/, p);
+  // And it is a comment on the top-level document, which must be given.
+  refused(rest('/api/v6/comments', 'POST', {body: {did: 'x', elementId: E, ref: {documentId: A}}}), /element/, p);
+});
+
+test('prefixed element ids are scoped by their prefixed document id', () => {
+  const T = '4'.repeat(24);
+  const p = v2({[A]: {branches: {[W]: {all: 'write'}}}, [B]: {branches: {[W]: {tabs: {[E]: {mode: 'read'}}}}}});
+  const withT = v2({[A]: {branches: {[W]: {all: 'write'}}}, [B]: {branches: {[W]: {tabs: {[T]: {mode: 'read'}}}}}});
+  const app = `/api/v10/appelements/d/${A}/w/${W}/e/${E}`;
+  for (const [path, body] of [[`${app}/references`, {targetDocumentId: B, targetElementId: T}],
+    [`${app}/copyassociativedata`, {sourceDocumentId: B, sourceElementId: T}],
+    [`/api/v10/partstudios/d/${A}/w/${W}/e/${E}/features`, {feature: {proxyDocumentId: B, proxyElementIds: [T]}}],
+    [`${app}/references`, {TargetDocumentID: B.toUpperCase(), TARGETELEMENTID: T}]]) {
+    const job = rest(path, 'POST', {body});
+    hasNeed(job, tab(B, null, T, 'read'));
+    refused(job, new RegExp(`tab ${T} in any branch of document ${B}`), p);
+    allowed(job, withT);
+  }
+  // Prefixed and plain pairs in one object each keep their own document.
+  const mixed = rest(`${app}/references`, 'POST', {body: {documentId: A, elementId: E2, targetDocumentId: B, targetElementId: T}});
+  needs(mixed, [tab(A, W, E, 'write'), tab(A, null, E2, 'read'), tab(B, null, T, 'read')]);
+  // Without its prefixed document, a prefixed element id falls back to documentId, then the request's document.
+  hasNeed(rest(`${app}/references`, 'POST', {body: {documentId: B, targetElementId: T}}), tab(B, null, T, 'read'));
+  hasNeed(rest(`${app}/references`, 'POST', {body: {targetElementId: T}}), tab(A, null, T, 'read'));
 });
 
 test('merge needs toggle, whole-branch write and approval', () => {
