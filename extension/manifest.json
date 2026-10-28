@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Onshape Native Local Bridge",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Connect a local command server to Onshape's own editor messages. No API keys or cookie export.",
   "minimum_chrome_version": "120",
   "icons": {
@@ -25,5 +25,5 @@
       "64": "icons/icon-64.png"
     }
   },
-  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:8766 https://cad.onshape.com"}
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:8766 http://127.0.0.1:8766 https://cad.onshape.com"}
 }

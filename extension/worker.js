@@ -11,7 +11,9 @@ let socket = null;
 let heartbeat = null;
 let verified = null;  // the socket whose bridge proved the token
 let inFlight = false;
+let probing = false;
 const BASE = "ws://127.0.0.1:8766/extension";
+const HEALTH = "http://127.0.0.1:8766/health";
 
 async function settings() { return chrome.storage.local.get(["enabled"]); }
 
@@ -67,7 +69,12 @@ async function run(job, current) {
 
 async function connect() {
   const config = await settings();
-  if (!config.enabled || !BRIDGE_TOKEN || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+  if (!config.enabled || !BRIDGE_TOKEN || probing || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+  // Chrome logs every refused WebSocket on the extension Errors page, so probe first: a refused fetch is a
+  // catchable rejection. Any HTTP answer means a bridge is listening (the unsigned probe gets 401).
+  probing = true;
+  try { await fetch(HEALTH, {cache: "no-store"}); } catch { return; } finally { probing = false; }
+  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
   const current = new WebSocket(BASE);
   socket = current;
   // The bridge sends a challenge on accept; nothing runs until it proves the token.
