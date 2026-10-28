@@ -25,7 +25,9 @@ const positive = (v, fallback) => Number.isInteger(v) && v > 0 ? v : fallback;
 const ID_AFTER = new Set(["featureid", "partid", "nodeid", "occurrenceid", "fid", "sid"]);
 export function endpointKey(job) {
   const parts = String(job.path || "").split("?")[0].split("/");
-  const masked = parts.map((seg, i) => /^[0-9a-f]{24}$/i.test(seg) || ID_AFTER.has((parts[i - 1] || "").toLowerCase()) ? ":id" : seg);
+  const masked = parts.map((seg, i) => /^[0-9a-f]{24}$/i.test(seg) || ID_AFTER.has((parts[i - 1] || "").toLowerCase()) ? ":id"
+    // Onshape's route is .../{wvm}/{wvmid}/...: workspace, version and microversion reads share one budget.
+    : /^[wvm]$/.test(seg) && /^[0-9a-f]{24}$/i.test(parts[i + 1] || "") ? ":wvm" : seg);
   return `${String(job.method || "GET").toUpperCase()} ${masked.join("/")}`;
 }
 

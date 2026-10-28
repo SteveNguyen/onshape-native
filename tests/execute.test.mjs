@@ -112,7 +112,7 @@ test("execute records each REST call and refuses an endpoint Onshape rate-limite
   const limited = async () => { sent++; return {status: 429, body: {}, response_headers: {"retry-after": "600"}}; };
   await execute(features, {storage, run: limited});
   assert.equal(storage.data.rate.count, 1);
-  assert.ok(storage.data.rate.blocked["GET /api/v10/partstudios/d/:id/w/:id/e/:id/features"]);
+  assert.ok(storage.data.rate.blocked["GET /api/v10/partstudios/d/:id/:wvm/:id/e/:id/features"]);
   await assert.rejects(execute(features, {storage, run: limited}), /HTTP 429\); nothing was sent/);
   assert.equal(sent, 1);
   // A rate refusal is not an access need: no popup request is filed.

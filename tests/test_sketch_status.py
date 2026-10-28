@@ -1,7 +1,7 @@
 import asyncio
 import dataclasses
 
-from onshape_native.client import Settings
+from onshape_native.client import OnshapeError, Settings
 from onshape_native.service import Service
 
 URL = "https://cad.onshape.com/documents/" + "a" * 24 + "/w/" + "b" * 24 + "/e/" + "c" * 24
@@ -27,7 +27,10 @@ def service(tmp_path, calls):
 
     async def evaluate(data, script, queries=None):
         return {"result": []}
-    s.call, s.eval = call, evaluate
+
+    async def no_editor(job):  # never reach a real bridge from a unit test
+        raise OnshapeError("Open the exact target workspace/element in Comet.")
+    s.call, s.eval, s.client.command = call, evaluate, no_editor
     return s
 
 

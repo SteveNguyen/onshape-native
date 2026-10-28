@@ -20,6 +20,21 @@ class Service:
         self.catalog = Catalog()
         self.store = Store(self.settings.cache_dir)
         self.locks = {}
+        self.written = {}  # (did, wid) -> microversion our last REST write produced; the editor may lag behind it
+
+    async def editor_microversion(self, target, configuration):
+        """The open editor's current revision, read without any REST call; None when it cannot be trusted."""
+        if target["wvm"] != "w" or configuration:
+            return None
+        try:
+            state = await self.client.command({"kind": "state", "target": {"did": target["did"], "wid": target["wvmid"], "eid": target["eid"]}})
+        except OnshapeError:
+            return None  # no open tab for this element (or several): use the REST read
+        micro = state.get("microversion")
+        written = self.written.get((target["did"], target["wvmid"]))
+        if not micro or not state.get("connected", True) or (written and micro != written):
+            return None
+        return micro
 
     async def call(self, operation, path=None, query=None, body=None):
         method, url = self.catalog.resolve(operation, path or {}, query)
@@ -59,8 +74,14 @@ class Service:
         old = self.snapshot_data(previous) if previous else None
         if old and (old["target"] != target or old["configuration"] != configuration):
             raise OnshapeError("Previous snapshot refers to another element or configuration.")
-        raw = await self.call("getPartStudioFeatures", target, {"configuration": configuration, "noSketchGeometry": True})
-        micro = raw.get("sourceMicroversion")
+        # The features endpoint has one of the smallest daily budgets: ask the open editor for the revision first,
+        # then read features pinned to it (cacheable), or return unchanged without any REST call.
+        editor = await self.editor_microversion(target, configuration)
+        if editor and old and editor == old["microversion"] and (not geometry or old.get("geometry_complete")):
+            return {"snapshot": previous, "microversion": editor, "unchanged": True, "api_calls": 0}
+        at = {**target, "wvm": "m", "wvmid": editor} if editor else target
+        raw = await self.call("getPartStudioFeatures", at, {"configuration": configuration, "noSketchGeometry": True})
+        micro = raw.get("sourceMicroversion") or editor
         if not micro:
             raise OnshapeError("Feature response lacks sourceMicroversion; cannot construct a consistent snapshot.")
         if old and micro == old["microversion"] and (not geometry or old.get("geometry_complete")):
@@ -180,6 +201,8 @@ class Service:
                                "name": f["name"], "state": response.get("featureState"),
                                "response": self.store.put(response)["artifact"]})
                 micro = response.get("sourceMicroversion")
+                if micro:
+                    self.written[(target["did"], target["wvmid"])] = micro
                 if not micro or response.get("microversionSkew") or response.get("featureState", {}).get("featureStatus") != "OK":
                     return {"completed": result, "stopped": True, "next": "Inspect regeneration errors; do not replay the batch."}
                 if n in sketches:

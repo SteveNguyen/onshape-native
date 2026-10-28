@@ -8,10 +8,10 @@ const at = (h, m = 0, s = 0) => new Date(2026, 9, 28, h, m, s).getTime();
 const ok = {status: 200, body: {}, response_headers: {}};
 
 test("endpoint keys mask document, element and feature ids, never the query", () => {
-  assert.equal(endpointKey(get()), "GET /api/v10/partstudios/d/:id/w/:id/e/:id/features");
+  assert.equal(endpointKey(get()), "GET /api/v10/partstudios/d/:id/:wvm/:id/e/:id/features");
   assert.equal(endpointKey({kind: "rest", method: "POST", path: `/api/v10/partstudios/d/${D}/w/${W}/e/${E}/features/featureid/F9Iro1KS9fdAjsA_73`}),
-    "POST /api/v10/partstudios/d/:id/w/:id/e/:id/features/featureid/:id");
-  assert.equal(endpointKey(get(`/api/v10/parts/d/${D}/w/${W}/e/${E}/partid/JFD/massproperties`)), "GET /api/v10/parts/d/:id/w/:id/e/:id/partid/:id/massproperties");
+    "POST /api/v10/partstudios/d/:id/:wvm/:id/e/:id/features/featureid/:id");
+  assert.equal(endpointKey(get(`/api/v10/parts/d/${D}/w/${W}/e/${E}/partid/JFD/massproperties`)), "GET /api/v10/parts/d/:id/:wvm/:id/e/:id/partid/:id/massproperties");
 });
 
 test("editor jobs are neither checked nor counted", () => {
@@ -67,7 +67,7 @@ test("summary reports today's use and live blocks only", () => {
   state = record(state, get(`/api/v10/parts/d/${D}/w/${W}/e/${E}`), {status: 429, body: {}, response_headers: {"retry-after": "1"}}, at(10));
   const s = summary(state, at(10, 0, 30), {perMinute: 60, perDay: 1500});
   assert.equal(s.today, 2);
-  assert.deepEqual(s.blocked.map(b => b.endpoint), ["GET /api/v10/partstudios/d/:id/w/:id/e/:id/features"]);
+  assert.deepEqual(s.blocked.map(b => b.endpoint), ["GET /api/v10/partstudios/d/:id/:wvm/:id/e/:id/features"]);
   assert.equal(s.perDay, 1500);
 });
 
@@ -118,4 +118,11 @@ test("summary lists each endpoint's remaining budget, most used first", () => {
   state = seen(state, 3000, at(10, 1), get(`/api/v10/partstudios/d/${D}/w/${W}/e/${E}/boundingboxes`));
   const s = summary(state, at(10, 2), DEFAULTS);
   assert.deepEqual(s.endpoints.map(e => [e.endpoint.split("/").pop(), e.remaining, e.budget]), [["features", 120, 500], ["boundingboxes", 3000, 3000]]);
+});
+
+test("workspace and pinned reads of the same route share one budget and one block", () => {
+  const pinned = get(`/api/v10/partstudios/d/${D}/m/${"1".repeat(24)}/e/${E}/features`);
+  assert.equal(endpointKey(pinned), endpointKey(get()));
+  const state = record({}, get(), {status: 429, body: {}, response_headers: {"retry-after": "600"}}, at(10));
+  assert.throws(() => check(state, pinned, at(10, 1), DEFAULTS), /HTTP 429/);
 });
