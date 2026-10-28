@@ -218,7 +218,7 @@ export async function pageCommand(job) {
   const reads = new Set(["ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiMeasureCall",
     "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchGetProjectionCall",
     "ui.GBTUiMassPropCall", "ui.GBTUiGetQueryDataCall", "ui.document.GBTUiQueryInsertables",
-    "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest"]);
+    "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest", "ui.GBTUiInterferenceCall"]);
   // Additional commands are allowed only when exported by the captured client
   // schema and present in the running serializer. Catalog labels them untested.
   if (!allowed.has(job.command) && (!job.command.includes("GBTUi") || !constructors.has(job.command) || /Response|Notification|DisplayData|ComputedData/.test(job.command))) {

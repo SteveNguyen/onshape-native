@@ -8,7 +8,7 @@ READS = {
     "ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiMeasureCall",
     "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchGetProjectionCall",
     "ui.GBTUiMassPropCall", "ui.GBTUiGetQueryDataCall", "ui.document.GBTUiQueryInsertables",
-    "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest",
+    "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest", "ui.GBTUiInterferenceCall",
 }
 
 VERIFIED = {"ui.assembly.GBTUiAssemblyInsertOccurrence", "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest", "ui.GBTUiBatchPartPropertyChange", "ui.GBTUiMassPropCall", "ui.assembly.GBTUiChangeOccurrenceFixedStatus",

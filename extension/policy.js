@@ -57,7 +57,7 @@ export const NATIVE_READS = new Set([
   "ui.GBTUiGetFeatureSettingsCall", "ui.GBTUiMeasureCall",
   "ui.sketch.GBTUiSketchGetConstraintGraphCall", "ui.sketch.GBTUiSketchGetProjectionCall",
   "ui.GBTUiMassPropCall", "ui.GBTUiGetQueryDataCall", "ui.document.GBTUiQueryInsertables",
-  "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest",
+  "ui.assembly.GBTUiAssemblyTreeItemDefinitionRequest", "ui.GBTUiInterferenceCall",
 ]);
 // Every native command the page adapter accepts without the untested opt-in (its `allowed` set, kept equal
 // by a JS test) plus the reads.

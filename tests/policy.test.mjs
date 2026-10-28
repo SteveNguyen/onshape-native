@@ -635,7 +635,7 @@ test('native commands map to modes', () => {
   needs({kind: 'ui_action', target: {did: A, wid: W, eid: E}}, [tab(A, W, E, 'write')]);
   needs({kind: 'tabs'}, []);
   // The extension's read list mirrors onshape_native/native_catalog.py READS (sync test in Task 6).
-  assert.equal(NATIVE_READS.size, 8);
+  assert.equal(NATIVE_READS.size, 9);
 });
 
 // ---- Task 3: authorization against grants ----

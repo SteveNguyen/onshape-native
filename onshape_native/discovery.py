@@ -51,6 +51,8 @@ HINTS = {
     "GBTUiReorderFeatures": "move reorder feature sidebar folder hierarchy",
     "GBTUiBatchPartPropertyChange": "assign material density mass weight part properties",
     "GBTUiMassPropCall": "measure mass weight volume center gravity inertia",
+    "interference_check": "assembly interference clash collision overlap penetration parts touching check",
+    "GBTUiInterferenceCall": "assembly interference clash collision overlap check",
     "getPartMassProperties": "how much does this part weigh measure mass weight volume center gravity inertia",
     "getAssemblyMassProperties": "how much does assembly weigh measure total mass weight center gravity inertia",
     "feature_template": "create modify cube height extrusion depth round solid edges fillet hollow shell thickness torus revolve sketch loft sweep pattern parameters",

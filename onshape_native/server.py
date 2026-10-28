@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 
 from .bridge import running_bridge
 from .native_catalog import catalog as native_commands, READS
+from . import interference
 from .discovery import index as command_index
 from .structure_service import Structures
 from .client import OnshapeError
@@ -360,6 +361,26 @@ async def native_read(url: str, command: str, body: dict | None = None, tab_id: 
         raise OnshapeError("Use native_write for mutation commands.")
     data = await svc().client.command({"kind": "native", "target": native_target(url), "command": command, "body": body or {}, "tab_id": tab_id})
     return compact(svc().store.response(data))
+
+
+@mcp.tool(structured_output=False, annotations=READ)
+async def interference_check(url: str, occurrence_paths: list[list[str]] | None = None, include_standard_content: bool = False,
+                             tab_id: int | None = None) -> str:
+    """Run Onshape's own assembly interference check in the open editor tab (read-only, same engine as the UI).
+    Checks every top-level non-suppressed occurrence unless occurrence_paths is given; an empty selection would check nothing.
+    Reports interfering pairs by instance name, each overlap's size and assembly-frame box in mm, and whether the revision stayed unchanged."""
+    s = svc()
+    target = native_target(url)
+    definition = await s.call("getAssemblyDefinition", {"did": target["did"], "wvm": "w", "wvmid": target["wid"], "eid": target["eid"]},
+                              {"includeNonSolids": "true", "excludeSuppressed": "true"})
+    root = definition["rootAssembly"]
+    names = {i["id"]: i["name"] for a in [root, *definition.get("subAssemblies", [])] for i in a.get("instances", [])}
+    paths = occurrence_paths or [o["path"] for o in root.get("occurrences", []) if len(o["path"]) == 1]
+    data = await s.client.command({"kind": "native", "target": target, "command": interference.COMMAND,
+                                   "body": interference.request_body(paths, include_standard_content), "tab_id": tab_id})
+    report = {**interference.summarize(data.get("result") or {}, names), "checked_occurrences": len(paths),
+              "revision_unchanged": data.get("microversion_before") == data.get("microversion_after")}
+    return compact(s.store.response(report))
 
 
 @mcp.tool(structured_output=False, annotations=WRITE)
