@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, parse_qs
 
 from .catalog import Catalog
 from .client import Client, OnshapeError, Settings
-from .geometry import SUMMARY_SCRIPT, decode_fs, delta, feature_rows
+from .geometry import SUMMARY_SCRIPT, decode_fs, delta, feature_rows, sketch_status
 from .store import Store
 
 
@@ -71,9 +71,13 @@ class Service:
                 "frame": {"coordinates": "Part Studio world, right-handed XYZ", "length": "mm", "volume": "mm^3"},
                 "geometry_complete": False}
         if geometry:
-            parts, measured = await asyncio.gather(
+            parts, measured, sketches = await asyncio.gather(
                 self.call("getPartsWMVE", self.pinned(data), {"configuration": configuration}),
-                self.eval(data, SUMMARY_SCRIPT))
+                self.eval(data, SUMMARY_SCRIPT),
+                self.call("getSketchInfo", self.pinned(data), {"output3D": "false"}))
+            solve = sketch_status(sketches)
+            for row in data["features"]:
+                row.update(solve.get(row["id"], {}))
             names = {p["partId"]: p.get("name") for p in parts}
             data["part_count"] = len(parts)
             data["parts"] = [{"id": p["partId"], "name": p.get("name"), "type": p.get("bodyType")} for p in parts]
@@ -87,6 +91,11 @@ class Service:
                   "feature_count": len(data["features"]), "geometry_complete": data["geometry_complete"],
                   "feature_errors": [f for f in data["features"] if f["status"] not in ("OK", "SUPPRESSED")],
                   "artifact_path": saved["path"]}
+        if geometry:
+            # Under-constrained sketches are worth surfacing even when every feature regenerates.
+            output["sketch_issues"] = [{k: f[k] for k in ("id", "name", "sketch_status", "sketch_not_well_defined") if k in f}
+                                       for f in data["features"] if "sketch_status" in f
+                                       and (f["sketch_status"] != "WELL_DEFINED" or "sketch_not_well_defined" in f)]
         if old and old.get("geometry_complete") == data.get("geometry_complete"):
             output["delta"] = delta(old, data)
         else:

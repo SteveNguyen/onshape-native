@@ -55,6 +55,20 @@ def feature_rows(raw):
             for f in raw.get("features", [])]
 
 
+def sketch_status(info):
+    """Map getSketchInfo to per-sketch row fields. Entities are checked individually: the
+    sketch-level status can read WELL_DEFINED while a point is still UNDERDEFINED."""
+    rows = {}
+    for sketch in info.get("sketches", []):
+        row = {"sketch_status": sketch.get("sketchSolveStatus", "UNKNOWN")}
+        loose = [{"entity": e.get("sketchEntityId"), "status": e.get("entitySolveStatus", "UNKNOWN")}
+                 for e in sketch.get("entities", []) if e.get("entitySolveStatus") not in ("WELL_DEFINED", "FIXED")]
+        if loose:
+            row["sketch_not_well_defined"] = loose
+        rows[sketch.get("featureId")] = row
+    return rows
+
+
 def delta(before, after):
     out = {}
     for field in ("features", "solids"):
