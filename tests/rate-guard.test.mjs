@@ -81,3 +81,41 @@ test("a reset on another day names the date, as Onshape's Retry-After can be abo
   const state = record({}, get(), {status: 429, body: {}, response_headers: {"retry-after": "83040"}}, at(17, 26));
   assert.throws(() => check(state, get(), at(17, 27), DEFAULTS), /wait until 2026-10-29 16:30/);
 });
+
+const seen = (state, remaining, t, job = get()) => record(state, job, {...ok, response_headers: {"x-rate-limit-remaining": String(remaining)}}, t);
+
+test("calls are spaced by at least 250 ms: check returns the wait", () => {
+  const state = record({}, get(), ok, at(10));
+  assert.equal(check(state, get(), at(10) + 100, DEFAULTS), 150);
+  assert.equal(check(state, get(), at(10) + 400, DEFAULTS), 0);
+});
+
+test("an endpoint's budget is the highest remaining seen; reads stop at 10% to keep a reserve, writes still pass", () => {
+  let state = seen({}, 500, at(9));
+  state = seen(state, 49, at(10));
+  assert.throws(() => check(state, get(), at(10, 1), DEFAULTS), /49 of about 500 .* left today; reads are paused to keep a reserve/);
+  const write = {kind: "rest", method: "POST", path: get().path};
+  assert.doesNotThrow(() => check(state, write, at(10, 1), DEFAULTS));
+});
+
+test("below 25% an endpoint's calls are spaced 5 s apart", () => {
+  let state = seen({}, 500, at(9));
+  state = seen(state, 120, at(10));
+  assert.equal(check(state, get(), at(10, 0, 2), DEFAULTS), 3000);
+  assert.equal(check(state, get(), at(10, 0, 6), DEFAULTS), 0);
+  assert.equal(check(seen(seen({}, 500, at(9)), 300, at(10)), get(), at(10, 0, 2), DEFAULTS), 0);
+});
+
+test("what is known about an endpoint expires after a day, when Onshape's window has reset", () => {
+  let state = seen({}, 500, at(9));
+  state = seen(state, 20, at(10));
+  assert.doesNotThrow(() => check(state, get(), new Date(2026, 9, 29, 10, 1).getTime(), DEFAULTS));
+});
+
+test("summary lists each endpoint's remaining budget, most used first", () => {
+  let state = seen({}, 500, at(9));
+  state = seen(state, 120, at(10));
+  state = seen(state, 3000, at(10, 1), get(`/api/v10/partstudios/d/${D}/w/${W}/e/${E}/boundingboxes`));
+  const s = summary(state, at(10, 2), DEFAULTS);
+  assert.deepEqual(s.endpoints.map(e => [e.endpoint.split("/").pop(), e.remaining, e.budget]), [["features", 120, 500], ["boundingboxes", 3000, 3000]]);
+});

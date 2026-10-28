@@ -216,9 +216,15 @@ async function renderUsage() {
   const paused = u.blocked.map(b => el("li", {className: "small"},
     el("div", {className: "id", textContent: b.endpoint}),
     el("div", {className: "warn", textContent: `${b.reason === "429" ? "Onshape asked to wait" : "Nearly used up"} until ${time(b.until)}`})));
+  // Onshape's own daily budget per endpoint, as its X-Rate-Limit-Remaining header reports it; most used first.
+  const short = endpoint => endpoint.replace(/\/api\/v\d+\//, "/").replace(/\/d\/:id\/[wvm]\/:id\/e\/:id/, "");
+  const budgets = u.endpoints.slice(0, 5).map(e => el("li", {className: "small row"},
+    el("span", {className: "id grow", textContent: short(e.endpoint)}),
+    el("span", {className: e.remaining <= e.budget / 4 ? "warn" : "muted", textContent: `${e.remaining} / ${e.budget} left`})));
   $("usageBody").replaceChildren(
-    el("div", {className: "muted small", textContent: "Calls sent through your session: not counted in Onshape's annual API limit, but each endpoint is rate limited. Calls over a cap are refused here, before anything is sent."}),
+    el("div", {className: "muted small", textContent: "Calls sent through your session: not counted in Onshape's annual API limit, but each endpoint has a daily budget. Calls are spaced out, slowed near a budget's end and refused here, before anything is sent, when a cap is reached."}),
     cap("perMinute", "Max per minute"), cap("perDay", "Max per day"),
+    ...(budgets.length ? [el("h2", {textContent: "Onshape budgets (today)"}), el("ul", {}, ...budgets)] : []),
     ...(paused.length ? [el("h2", {textContent: "Paused endpoints"}), el("ul", {}, ...paused)] : []));
 }
 async function render() {

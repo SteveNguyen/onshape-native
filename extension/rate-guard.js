@@ -2,9 +2,14 @@
 // Onshape's annual API limit, but every endpoint is rate limited (HTTP 429 with Retry-After). The guard honours those
 // signals and adds our own ceiling, so the account never hammers an endpoint. Pure: state, clock and limits are passed
 // in; the caller stores the state. Editor-channel jobs (native, display, state, tabs) are not REST and pass untouched.
+// Onshape's per-endpoint budgets are daily (Retry-After ~1 day) and small for common reads (~500/day measured on a
+// free account), so the guard learns each endpoint's budget from X-Rate-Limit-Remaining and slows down well before it.
 export const DEFAULTS = {perMinute: 60, perDay: 1500};
-const MINUTE = 60000;
+const MINUTE = 60000, DAY = 86400000;
 const LOW_REMAINING = 2;  // pause an endpoint once Onshape says this few calls are left in its window
+const GAP = 250;          // minimum ms between any two REST calls: no bursts
+const SLOW = 0.25, SLOW_GAP = 5000;  // below 25% of an endpoint's budget, 5 s between its calls
+const RESERVE = 0.10;     // below 10%, reads are refused so writes the user asked for still have room
 
 export class RateLimitError extends Error {}
 
@@ -28,9 +33,10 @@ function limitsOf(limits) {
   return {perMinute: positive(limits?.perMinute, DEFAULTS.perMinute), perDay: positive(limits?.perDay, DEFAULTS.perDay)};
 }
 
-// Throws RateLimitError, before anything is sent, when the call must not go out now.
+// Throws RateLimitError, before anything is sent, when the call must not go out now; otherwise returns how many
+// ms the caller must wait before sending (0 most of the time).
 export function check(state, job, now, limits) {
-  if (!isRest(job)) return;
+  if (!isRest(job)) return 0;
   const {perMinute, perDay} = limitsOf(limits);
   const key = endpointKey(job);
   const block = state?.blocked?.[key];
@@ -43,6 +49,14 @@ export function check(state, job, now, limits) {
     throw new RateLimitError(`Local cap of ${perMinute} calls per minute reached; nothing was sent. Wait a minute or batch the work.`);
   if (state?.day === dayOf(now) && (state.count || 0) >= perDay)
     throw new RateLimitError(`Local cap of ${perDay} calls per day reached; nothing was sent. The count resets at midnight (raise it in the popup only if needed).`);
+  let wait = recent.length ? Math.max(0, GAP - (now - recent[recent.length - 1])) : 0;
+  const e = state?.endpoints?.[key];
+  if (e && now - e.seen < DAY && e.budget > 0) {
+    if (e.remaining <= e.budget * RESERVE && String(job.method || "GET").toUpperCase() === "GET")
+      throw new RateLimitError(`${key}: ${e.remaining} of about ${e.budget} Onshape calls left today; reads are paused to keep a reserve, nothing was sent. Reuse earlier results or wait for Onshape's daily reset.`);
+    if (e.remaining <= e.budget * SLOW) wait = Math.max(wait, SLOW_GAP - (now - e.last));
+  }
+  return wait;
 }
 
 // Returns the new state after a REST call was attempted. result is null when the call failed without an answer:
@@ -53,15 +67,21 @@ export function record(state, job, result, now) {
   const today = dayOf(now);
   const blocked = Object.fromEntries(Object.entries(state?.blocked || {}).filter(([, b]) => b.until > now));
   const headers = result?.response_headers || {};
+  const endpoints = {...(state?.endpoints || {})};
   if (result?.status === 429) {
     const seconds = Number(headers["retry-after"]);
     blocked[key] = {until: now + (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : MINUTE), reason: "429"};
   } else {
     const remaining = Number(headers["x-rate-limit-remaining"] ?? headers["x-ratelimit-remaining"]);
     if (Number.isFinite(remaining) && remaining <= LOW_REMAINING) blocked[key] = {until: now + MINUTE, reason: "low"};
+    if (Number.isFinite(remaining) && remaining >= 0) {
+      // The budget is the highest remaining ever seen for this endpoint: a fresh window starts there.
+      endpoints[key] = {budget: Math.max(endpoints[key]?.budget || 0, remaining), remaining, seen: now, last: now};
+    }
   }
+  if (endpoints[key]) endpoints[key] = {...endpoints[key], last: now};  // spacing counts every call, answered or not
   return {day: today, count: (state?.day === today ? state.count || 0 : 0) + 1,
-          recent: [...(state?.recent || []).filter(t => now - t < MINUTE), now], blocked};
+          recent: [...(state?.recent || []).filter(t => now - t < MINUTE), now], blocked, endpoints};
 }
 
 // For the popup: today's count, the caps in force and the endpoints still blocked.
@@ -69,5 +89,8 @@ export function summary(state, now, limits) {
   const {perMinute, perDay} = limitsOf(limits);
   return {today: state?.day === dayOf(now) ? state.count || 0 : 0, perMinute, perDay,
           blocked: Object.entries(state?.blocked || {}).filter(([, b]) => b.until > now)
-            .map(([endpoint, b]) => ({endpoint, until: b.until, reason: b.reason}))};
+            .map(([endpoint, b]) => ({endpoint, until: b.until, reason: b.reason})),
+          endpoints: Object.entries(state?.endpoints || {}).filter(([, e]) => now - e.seen < DAY && e.budget > 0)
+            .map(([endpoint, e]) => ({endpoint, remaining: e.remaining, budget: e.budget}))
+            .sort((a, b) => a.remaining / a.budget - b.remaining / b.budget)};
 }

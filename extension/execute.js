@@ -19,8 +19,8 @@ export async function fileAccessRequest(storage, job, error, refreshBadge = asyn
   } catch { /* the bridge still gets the original error */ }
 }
 
-// deps: {storage, run(job, current) -> result, refreshBadge?}.
-export async function execute(job, {storage, run, refreshBadge}) {
+// deps: {storage, run(job, current) -> result, refreshBadge?, sleep?(ms)}.
+export async function execute(job, {storage, run, refreshBadge, sleep = ms => new Promise(r => setTimeout(r, ms))}) {
   // The popup-managed policy is authoritative; bridge-supplied trust fields are overwritten.
   const {policy, created, approvals: rawApprovals, consumed: rawConsumed} = await stored(storage);
   const current = effectivePolicy(policy, created);
@@ -44,7 +44,8 @@ export async function execute(job, {storage, run, refreshBadge}) {
   }
   // Rate guard: refuse before sending when Onshape asked us to wait or our caps are reached, then count the call.
   const {rate, rate_limits} = await storage.get(["rate", "rate_limits"]);
-  checkRate(rate, job, Date.now(), rate_limits);
+  const wait = checkRate(rate, job, Date.now(), rate_limits);
+  if (wait > 0) await sleep(Math.min(wait, 10000));
   let result;
   try { result = await run(job, current); }
   catch (error) { if (job.kind === "rest") await storage.set({rate: recordRate(rate, job, null, Date.now())}); throw error; }

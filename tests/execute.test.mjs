@@ -134,3 +134,14 @@ test("editor jobs are not counted by the rate guard", async () => {
   await execute(native, {storage, run: async () => ({result: {}})});
   assert.equal(storage.data.rate, undefined);
 });
+
+test("execute waits the guard's spacing before sending, without refusing", async () => {
+  const storage = fakeStorage({policy: readPolicy});
+  const waits = [];
+  const deps = {storage, run: async () => ({status: 200, body: {}, response_headers: {}}), sleep: async ms => { waits.push(ms); }};
+  await execute(features, deps);
+  await execute(features, deps);
+  assert.equal(storage.data.rate.count, 2);
+  assert.equal(waits.length, 1);
+  assert.ok(waits[0] > 0 && waits[0] <= 250);
+});

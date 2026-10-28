@@ -1,12 +1,19 @@
 """Browser-session transport. No Onshape keys, cookies, or HMAC in this package."""
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 import base64
+import copy
+import json
+import re
 import secrets
 
 import httpx
 
 from .config import load_config, response_valid, runtime_dir, sign_request
+
+PINNED = re.compile(r"/[mv]/[0-9a-f]{24}(?:/|$)")
+CACHE_ENTRY_MAX = 8 * 1024 * 1024  # larger answers (exports, big trees) are not kept
 
 
 class OnshapeError(Exception):
@@ -49,6 +56,9 @@ class Client:
                                       timeout=110, follow_redirects=False, trust_env=False, transport=transport)
         self.calls = 0
         self.rate = {}
+        # Answers to reads pinned to a revision (/m/<id>/ or /v/<id>/) never change: repeats are served locally,
+        # which is what keeps Onshape's per-endpoint daily budgets (often ~500 calls) far from exhaustion.
+        self.cache, self.cache_hits, self.cache_limit = OrderedDict(), 0, 256
 
     async def close(self):
         await self.http.aclose()
@@ -74,9 +84,24 @@ class Client:
             return {"bridge_connected": False, "extension_connected": False}
 
     async def request(self, method, path, query=None, body=None, *, read_only=False):
+        key = None
+        if (method == "GET" or read_only) and PINNED.search(path):
+            key = json.dumps([method, path, query or {}, body], sort_keys=True, default=str)
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                self.cache_hits += 1
+                return copy.deepcopy(self.cache[key])
         self.calls += 1
         data = await self.command({"kind": "rest", "method": method, "path": path,
                                    "query": query or {}, "body": body})
+        result = self._result(method, path, data)
+        if key is not None and len(json.dumps(result, default=str) if not isinstance(result, bytes) else result) <= CACHE_ENTRY_MAX:
+            self.cache[key] = copy.deepcopy(result)
+            while len(self.cache) > self.cache_limit:
+                self.cache.popitem(last=False)
+        return result
+
+    def _result(self, method, path, data):
         status = data.get("status", 0)
         if status == 429:
             # Onshape rate-limits each endpoint; the extension now refuses it locally until Retry-After passes.
