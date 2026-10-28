@@ -107,6 +107,13 @@ have backend operations. UI controls and native serializers can change with
 Onshape builds; report an actual unsupported operation rather than claiming
 every catalog candidate is verified.
 
+Onshape budgets REST calls per endpoint per day (the features endpoint about 500 on a
+free account). Session calls skip the annual API limit, not these. Keep the element's tab
+open (revision checks then cost no REST), pass `previous=` to `inspect_model`, reuse
+snapshots instead of re-reading, and never loop over reads. A refusal from the
+extension's rate guard or an HTTP 429 means stop and tell the user: never retry or route
+around it through other endpoints.
+
 Part Studio features (model the way a careful CAD user would):
 
 - Prefer the sketch builder: `feature(action="add", changes=[{"sketch": {"name", "plane":
