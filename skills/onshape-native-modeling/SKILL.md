@@ -109,6 +109,15 @@ every catalog candidate is verified.
 
 Part Studio features (model the way a careful CAD user would):
 
+- Prefer the sketch builder: `feature(action="add", changes=[{"sketch": {"name", "plane":
+  "Top"|"Front"|"Right"|{"face": id}, "items": [...], "constraints": [...]}}])`. Items:
+  `circle` {d|r, at}, `pattern` {count, pcd, d|r, start_angle 0/90/180/270 deg, at},
+  `rectangle` {w, h, at} (centre addressable as `<id>.center`), `point` {at}; `at` is
+  "origin", {"vertex": id}, {"edge": id} (concentric) or a local point. Sizes are
+  expressions, so variables work. Explicit constraints: horizontal_distance,
+  vertical_distance, distance, coincident, concentric, equal, parallel, perpendicular,
+  tangent, horizontal, vertical, diameter, radius, on named items or "origin". The
+  tool reads Onshape's solve status and stops the batch if any entity is not defined.
 - Fully constrain every sketch you add: tie it to existing geometry or the origin
   (external query `qCreatedBy(makeId("Origin"), EntityType.VERTEX)`, or a `PROJECTED`
   /`CONCENTRIC` reference to an existing edge) and drive every size. Give circles a

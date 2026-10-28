@@ -10,6 +10,7 @@ from .catalog import Catalog
 from .client import Client, OnshapeError, Settings
 from .geometry import SUMMARY_SCRIPT, decode_fs, delta, feature_rows, sketch_status
 from .store import Store
+from . import sketch_builder
 
 
 class Service:
@@ -119,9 +120,14 @@ class Service:
             raise OnshapeError("Combine all changes to the same feature into one edit entry.")
         raw = self.store.read(data["feature_artifact"])
         originals = {f["featureId"]: f for f in raw.get("features", [])}
-        work = []
+        work, sketches = [], set()
         for change in changes:
-            if action == "add":
+            if action == "add" and "sketch" in change:
+                if set(change) != {"sketch"}:
+                    raise OnshapeError("A sketch entry takes only the 'sketch' key.")
+                f = sketch_builder.build(change["sketch"])
+                sketches.add(len(work))
+            elif action == "add":
                 if change.get("featureId"):
                     raise OnshapeError("Do not reuse an existing featureId when adding a feature.")
                 if not change.get("featureType") or not change.get("name"):
@@ -158,7 +164,7 @@ class Service:
         result, micro = [], data["microversion"]
         lock = self.locks.setdefault(data["target"]["did"] + data["target"]["wvmid"], asyncio.Lock())
         async with lock:
-            for f in work:
+            for n, f in enumerate(work):
                 body = {"btType": "BTFeatureDefinitionCall-1406", "feature": f,
                         "sourceMicroversion": micro, "rejectMicroversionSkew": True,
                         "libraryVersion": data["libraryVersion"], "serializationVersion": data["serializationVersion"]}
@@ -176,6 +182,15 @@ class Service:
                 micro = response.get("sourceMicroversion")
                 if not micro or response.get("microversionSkew") or response.get("featureState", {}).get("featureStatus") != "OK":
                     return {"completed": result, "stopped": True, "next": "Inspect regeneration errors; do not replay the batch."}
+                if n in sketches:
+                    # A built sketch counts only when Onshape's solver reports every entity defined.
+                    fid = result[-1]["id"]
+                    at = {"did": target["did"], "wvm": "m", "wvmid": micro, "eid": target["eid"]}
+                    info = await self.call("getSketchInfo", at, {"sketchId": fid, "output3D": "false"})
+                    result[-1].update(sketch_status(info).get(fid, {"sketch_status": "UNKNOWN"}))
+                    if result[-1]["sketch_status"] != "WELL_DEFINED" or "sketch_not_well_defined" in result[-1]:
+                        return {"completed": result, "stopped": True,
+                                "next": "The sketch is not fully defined: add the missing constraints (feature edit) before using it."}
         return {"completed": result, "microversion": micro, "next": "inspect_model(url, previous=snapshot) to verify geometry and refresh references"}
 
     async def write(self, operation, path, query, body, detail="summary"):
