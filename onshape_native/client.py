@@ -78,6 +78,13 @@ class Client:
         data = await self.command({"kind": "rest", "method": method, "path": path,
                                    "query": query or {}, "body": body})
         status = data.get("status", 0)
+        if status == 429:
+            # Onshape rate-limits each endpoint; the extension now refuses it locally until Retry-After passes.
+            wait = data.get("response_headers", {}).get("retry-after")
+            when = f" for about {int(wait) / 3600:.1f} h" if str(wait).isdigit() and int(wait) >= 3600 else \
+                   f" for {wait} s" if str(wait).isdigit() else ""
+            raise OnshapeError(f"Onshape HTTP 429 (rate limit) on {method} {path}: Onshape asks to wait{when}. "
+                               "Do not retry or work around it with other endpoints; tell the user.")
         if not 200 <= status < 300:
             raise OnshapeError(f"Onshape browser HTTP {status}. Inspect state before retrying writes.")
         if data.get("encoding") == "base64":

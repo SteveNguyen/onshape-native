@@ -44,7 +44,7 @@ async function refreshBadge() {
 }
 
 // Authorize, file requests, consume approvals, run, record created objects: see execute.js (tested there).
-// The worker writes only "created", "requests", "consumed", never the popup's "policy"/"approvals".
+// The worker writes only "created", "requests", "consumed", "rate", never the popup's "policy"/"approvals"/"rate_limits".
 const execute = job => executePipeline(job, {storage: chrome.storage.local, run, refreshBadge});
 
 async function run(job, current) {

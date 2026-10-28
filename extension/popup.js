@@ -2,6 +2,7 @@ import {didFromUrl, docName, docLabel, targetFromUrl} from "./policy.js";
 import {ACTIONS, PRESETS, actionOn, addTab, applyPreset, bound, branchMode, checkPolicy, createdGrantRevocations, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
 import {approve, approveOnce, liveRequests} from "./requests.js";
 import {branchNames, tabsFromContents} from "./listings.js";
+import {summary as rateSummary} from "./rate-guard.js";
 
 const $ = id => document.getElementById(id);
 const status = $("status"), dot = $("dot"), toggle = $("toggle");
@@ -19,7 +20,7 @@ toggle.onclick = async () => {
 const el = (tag, props = {}, ...children) => { const node = Object.assign(document.createElement(tag), props); node.append(...children); return node; };
 // All model/Onshape text goes through textContent (el props or text children), never innerHTML.
 
-// This popup writes only "policy" and "approvals"; the worker writes "created", "requests", "consumed".
+// This popup writes only "policy", "approvals" and "rate_limits"; the worker writes "created", "requests", "consumed", "rate".
 // ctx: the active Onshape tab {did, wvm, wid, eid, docName, branchName, tabs}; wid/eid are "" off a /w/ URL. Names come only from our own listings.
 let ctx = null, branches = {}, listingError = false;
 const reasons = new Map();  // request id -> why Allow was refused
@@ -200,7 +201,28 @@ function renderAll(s) {
     el("button", {textContent: "Revoke", onclick: async () => { await change(base => revokeDocument(base, id)); await chrome.runtime.sendMessage({type: "revoke_created", did: id}); }})));
   $("docs").replaceChildren(...(items.length ? items : [el("li", {className: "muted", textContent: "None. The agent can only list tabs."})]));
 }
+// REST calls the worker sent today, the caps in force and the endpoints Onshape (or the guard) paused.
+async function renderUsage() {
+  const {rate, rate_limits} = await chrome.storage.local.get(["rate", "rate_limits"]);
+  const u = rateSummary(rate, Date.now(), rate_limits);
+  $("usageSummary").textContent = `Onshape API use: ${u.today} / ${u.perDay} today` + (u.blocked.length ? ` · ${u.blocked.length} paused` : "");
+  const cap = (key, label) => el("label", {}, label, el("input", {type: "number", min: "1", step: "1", value: String(u[key]),
+    onchange: async event => {
+      const value = Number(event.target.value);
+      if (!Number.isInteger(value) || value < 1) return renderUsage();
+      await chrome.storage.local.set({rate_limits: {perMinute: u.perMinute, perDay: u.perDay, [key]: value}});
+    }}));
+  const time = t => new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  const paused = u.blocked.map(b => el("li", {className: "small"},
+    el("div", {className: "id", textContent: b.endpoint}),
+    el("div", {className: "warn", textContent: `${b.reason === "429" ? "Onshape asked to wait" : "Nearly used up"} until ${time(b.until)}`})));
+  $("usageBody").replaceChildren(
+    el("div", {className: "muted small", textContent: "Calls sent through your session: not counted in Onshape's annual API limit, but each endpoint is rate limited. Calls over a cap are refused here, before anything is sent."}),
+    cap("perMinute", "Max per minute"), cap("perDay", "Max per day"),
+    ...(paused.length ? [el("h2", {textContent: "Paused endpoints"}), el("ul", {}, ...paused)] : []));
+}
 async function render() {
+  renderUsage();
   const s = await load();
   $("notice").hidden = !s.stale;
   $("notice").textContent = s.stored.malformed ? "Stored access policy is malformed, re-authorize." : "Access model changed, re-authorize.";
@@ -238,7 +260,11 @@ async function setContext() {
   $("custom").open = presetOf((await load()).eff, ctx ?? {did: "", wid: "", eid: ""}) === "custom";
   loadListings().then(render);
 }
-chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && (changes.policy || changes.created || changes.requests || changes.approvals)) render(); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.policy || changes.created || changes.requests || changes.approvals) render();
+  else if (changes.rate || changes.rate_limits) renderUsage();
+});
 const windowId = (await chrome.windows.getCurrent()).id;
 chrome.tabs.onActivated.addListener(info => { if (info.windowId === windowId) setContext(); });
 chrome.tabs.onUpdated.addListener((id, change, tab) => { if (tab.active && tab.windowId === windowId && change.url) setContext(); });

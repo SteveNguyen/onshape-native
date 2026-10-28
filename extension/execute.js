@@ -1,9 +1,10 @@
 // The worker's command pipeline and popup storage messages, with storage and the page runner injected so they
 // are testable without a browser. `storage` is chrome.storage.local (get(keys) / set(items), both promises).
-// The worker writes only "created", "requests", "consumed"; the popup writes "policy" and "approvals".
+// The worker writes only "created", "requests", "consumed", "rate"; the popup writes "policy", "approvals", "rate_limits".
 import {AccessError, authorize, applyPolicy, effectivePolicy, recordCreated} from "./policy.js";
 import {describeJob, fileRequest, pruneApprovals} from "./requests.js";
 import {revokeCreatedGrant} from "./grants.js";
+import {check as checkRate, record as recordRate} from "./rate-guard.js";
 
 const stored = storage => storage.get(["policy", "created", "requests", "approvals", "consumed"]);
 
@@ -41,7 +42,13 @@ export async function execute(job, {storage, run, refreshBadge}) {
     const kept = pruneApprovals(latest.approvals, latest.consumed, Date.now()).consumed;
     await storage.set({consumed: {...kept, [approvalKey]: approvals[approvalKey]}});
   }
-  const result = await run(job, current);
+  // Rate guard: refuse before sending when Onshape asked us to wait or our caps are reached, then count the call.
+  const {rate, rate_limits} = await storage.get(["rate", "rate_limits"]);
+  checkRate(rate, job, Date.now(), rate_limits);
+  let result;
+  try { result = await run(job, current); }
+  catch (error) { if (job.kind === "rest") await storage.set({rate: recordRate(rate, job, null, Date.now())}); throw error; }
+  if (job.kind === "rest") await storage.set({rate: recordRate(rate, job, result, Date.now())});
   // Re-read so a concurrent popup change is kept; commands are already serialized by the worker's inFlight.
   if (job.kind === "rest" && job.method !== "GET") {
     const latest = await stored(storage);

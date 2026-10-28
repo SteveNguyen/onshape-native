@@ -347,7 +347,7 @@ def create_app(config=None):
             if result.get("error"):
                 return JSONResponse(result, 502)
             status = result.get("status", 200)
-            response_headers = {k:v for k,v in result.get("response_headers", {}).items() if k.lower() in {"etag", "content-disposition", "content-range", "retry-after", "x-ratelimit-remaining"}}
+            response_headers = {k:v for k,v in result.get("response_headers", {}).items() if k.lower() in {"etag", "content-disposition", "content-range", "retry-after", "x-rate-limit-remaining", "x-ratelimit-remaining"}}
             if status in {204,304}:
                 return Response(status_code=status, headers=response_headers)
             if result.get("encoding") == "base64":

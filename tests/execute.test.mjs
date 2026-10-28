@@ -68,7 +68,7 @@ test("execute runs the authorized job with policy trust fields and records creat
   assert.equal(seen.allow_untested_native, false);
   assert.equal(storage.data.created.docs[NEW].branches["*"].all, "write");
   // The worker never writes the popup's keys.
-  assert.ok(storage.writes.flat().every(k => ["created", "requests", "consumed"].includes(k)));
+  assert.ok(storage.writes.flat().every(k => ["created", "requests", "consumed", "rate"].includes(k)));
 });
 
 test("popup storage messages reject every non-popup sender", async () => {
@@ -101,4 +101,36 @@ test("popup storage messages from the popup update worker-owned storage", async 
   assert.deepEqual(storage.data.created, created);
   await popupStorageMessage({type: "revoke_created", did: D}, popup, {storage, runtime});
   assert.deepEqual(storage.data.created, {docs: {}, grants: {}});
+});
+
+const readPolicy = {version: 2, docs: {[D]: {branches: {[W]: {tabs: {[E]: {mode: "read"}}}}}}};
+const features = {kind: "rest", method: "GET", path: `/api/v10/partstudios/d/${D}/w/${W}/e/${E}/features`, query: {}};
+
+test("execute records each REST call and refuses an endpoint Onshape rate-limited, without sending", async () => {
+  const storage = fakeStorage({policy: readPolicy});
+  let sent = 0;
+  const limited = async () => { sent++; return {status: 429, body: {}, response_headers: {"retry-after": "600"}}; };
+  await execute(features, {storage, run: limited});
+  assert.equal(storage.data.rate.count, 1);
+  assert.ok(storage.data.rate.blocked["GET /api/v10/partstudios/d/:id/w/:id/e/:id/features"]);
+  await assert.rejects(execute(features, {storage, run: limited}), /HTTP 429\); nothing was sent/);
+  assert.equal(sent, 1);
+  // A rate refusal is not an access need: no popup request is filed.
+  assert.equal(storage.data.requests, undefined);
+});
+
+test("execute applies the popup's caps and counts calls that failed without an answer", async () => {
+  const storage = fakeStorage({policy: readPolicy, rate_limits: {perMinute: 1, perDay: 100}});
+  await assert.rejects(execute(features, {storage, run: async () => { throw new Error("network down"); }}), /network down/);
+  assert.equal(storage.data.rate.count, 1);
+  let ran = false;
+  await assert.rejects(execute(features, {storage, run: async () => { ran = true; }}), /1 calls per minute/);
+  assert.equal(ran, false);
+});
+
+test("editor jobs are not counted by the rate guard", async () => {
+  const storage = fakeStorage({policy: readPolicy});
+  const native = {kind: "native", target: {did: D, wid: W, eid: E}, command: "ui.GBTUiMassPropCall", body: {}};
+  await execute(native, {storage, run: async () => ({result: {}})});
+  assert.equal(storage.data.rate, undefined);
 });
