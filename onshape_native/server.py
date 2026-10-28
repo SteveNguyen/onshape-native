@@ -366,19 +366,30 @@ async def native_read(url: str, command: str, body: dict | None = None, tab_id: 
 @mcp.tool(structured_output=False, annotations=READ)
 async def interference_check(url: str, occurrence_paths: list[list[str]] | None = None, include_standard_content: bool = False,
                              tab_id: int | None = None) -> str:
-    """Run Onshape's own assembly interference check in the open editor tab (read-only, same engine as the UI).
-    Checks every top-level non-suppressed occurrence unless occurrence_paths is given; an empty selection would check nothing.
-    Reports interfering pairs by instance name, each overlap's size and assembly-frame box in mm, and whether the revision stayed unchanged."""
+    """Run Onshape's own interference check in the open editor tab of an assembly or Part Studio (read-only, same engine as the UI).
+    Assemblies: every top-level non-suppressed occurrence unless occurrence_paths is given. Part Studios: every solid part.
+    An empty selection would check nothing. Reports interfering pairs by name, each overlap's size and element-frame box in mm,
+    and whether the revision stayed unchanged."""
     s = svc()
     target = native_target(url)
-    definition = await s.call("getAssemblyDefinition", {"did": target["did"], "wvm": "w", "wvmid": target["wid"], "eid": target["eid"]},
-                              {"includeNonSolids": "true", "excludeSuppressed": "true"})
-    root = definition["rootAssembly"]
-    names = {i["id"]: i["name"] for a in [root, *definition.get("subAssemblies", [])] for i in a.get("instances", [])}
-    paths = occurrence_paths or [o["path"] for o in root.get("occurrences", []) if len(o["path"]) == 1]
-    data = await s.client.command({"kind": "native", "target": target, "command": interference.COMMAND,
-                                   "body": interference.request_body(paths, include_standard_content), "tab_id": tab_id})
-    report = {**interference.summarize(data.get("result") or {}, names), "checked_occurrences": len(paths),
+    path = {"did": target["did"], "wvm": "w", "wvmid": target["wid"], "eid": target["eid"]}
+    elements = await s.call("getElementsInDocument", {k: path[k] for k in ("did", "wvm", "wvmid")}, {"elementId": path["eid"]})
+    kind = next((e["elementType"] for e in elements if e.get("id") == path["eid"]), None)
+    if kind == "ASSEMBLY":
+        definition = await s.call("getAssemblyDefinition", path, {"includeNonSolids": "true", "excludeSuppressed": "true"})
+        root = definition["rootAssembly"]
+        names = {i["id"]: i["name"] for a in [root, *definition.get("subAssemblies", [])] for i in a.get("instances", [])}
+        paths = occurrence_paths or [o["path"] for o in root.get("occurrences", []) if len(o["path"]) == 1]
+        body, checked = interference.request_body(paths, include_standard_content=include_standard_content), {"checked_occurrences": len(paths)}
+    elif kind == "PARTSTUDIO":
+        # Composite parts are left out: their member bodies are checked already.
+        parts = [p for p in await s.call("getPartsWMVE", path) if p.get("bodyType") == "solid" and not p.get("isCompositePart")]
+        names = {p["partId"]: p.get("name") or p["partId"] for p in parts}
+        body, checked = interference.request_body(part_ids=list(names)), {"checked_parts": len(names)}
+    else:
+        raise OnshapeError("Interference checks need an assembly or Part Studio element.")
+    data = await s.client.command({"kind": "native", "target": target, "command": interference.COMMAND, "body": body, "tab_id": tab_id})
+    report = {**interference.summarize(data.get("result") or {}, names), **checked,
               "revision_unchanged": data.get("microversion_before") == data.get("microversion_after")}
     return compact(s.store.response(report))
 

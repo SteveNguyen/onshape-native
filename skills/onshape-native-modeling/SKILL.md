@@ -68,7 +68,7 @@ indicate similarity, not successful live execution.
 | Assembly visibility, including inherited connectors | `display_state` → `set_visibility` → fresh `display_state` |
 | Revolute motion preview | `mate_animation` prepare → step/start → status/stop → restore |
 | Camera, fit/zoom and current viewport | `view_control` → `capture_viewport` |
-| Assembly interferences (Onshape's own check) | `interference_check` → fix → `interference_check` again |
+| Assembly or Part Studio interferences (Onshape's own check) | `interference_check` → fix → `interference_check` again |
 | Materials, density, mass, assembly instances/mates, imports/exports | `search_commands` → `api_catalog` → `api_read`/`api_write`/`api_upload` |
 | Native editor-only operations | `native_catalog` → `native_schema` → `native_state` → `native_read`/`native_write` |
 | Revision history | `document_history`, following `next_cursor` |
@@ -154,9 +154,10 @@ Assemblies:
   paths.
 - After placing or changing parts, run `interference_check`: it is Onshape's own
   check, run in the open editor tab without changing the model. It checks every
-  top-level occurrence by default; Onshape's call with an empty selection returns
-  no interferences, which is not an all-clear. Each overlap comes with its size and
-  assembly-frame box in mm: locate it on both parts before choosing a fix, and adapt
+  top-level occurrence of an assembly, or every solid part of a Part Studio, by
+  default; Onshape's call with an empty selection returns no interferences, which
+  is not an all-clear. Each overlap comes with its size and element-frame box in
+  mm: locate it on both parts before choosing a fix, and adapt
   the feature that causes it (e.g. a dimension from the part the design was made
   for) rather than patching around it.
 - Face deterministic IDs change when the source Part Studio is edited: read them

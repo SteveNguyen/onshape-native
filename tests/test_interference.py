@@ -32,9 +32,24 @@ REPLY = {"$type": "ui.GBTUiInterferenceResponse", "error": 0,
 NAMES = {"Mservo": "servo <1>", "Msub": "frame <1>", "Mbracket": "bracket <2>"}
 
 
+PART_REPLY = {"$type": "ui.GBTUiInterferenceResponse", "error": 0,
+              "interferences": [{"$type": "GBTUiPartInterference", "interferenceBodiesKeys": ["JFD,JID,0"], "partId1": "JFD", "partId2": "JID"}],
+              "interferenceBodies": {"JFD,JID,0": body([0.025, 0.01, 0.01], [0.0, 0.0, 0.0125])}}
+
+
 def test_empty_selection_is_refused_because_it_checks_nothing():
     with pytest.raises(OnshapeError, match="checks nothing"):
         request_body([])
+    with pytest.raises(OnshapeError, match="checks nothing"):
+        request_body(part_ids=[])
+
+
+def test_part_studio_request_and_summary_use_part_ids():
+    b = request_body(part_ids=["JFD", "JID"])
+    assert b["partIds"] == ["JFD", "JID"] and b["occurrences"] == []
+    pair = summarize(PART_REPLY, {"JFD": "Part 1", "JID": "Part 2"})["interferences"][0]
+    assert (pair["a"], pair["b"], pair["a_path"], pair["b_path"]) == ("Part 1", "Part 2", ["JFD"], ["JID"])
+    assert pair["overlaps"][0]["min_mm"] == [-12.5, -5.0, 7.5] and pair["overlaps"][0]["max_mm"] == [12.5, 5.0, 17.5]
 
 
 def test_request_body_types_each_occurrence_path():
@@ -72,15 +87,20 @@ class FakeClient:
 
 
 class FakeService:
-    def __init__(self, tmp_path, reply):
-        self.client, self.store, self.calls = FakeClient(reply), Store(tmp_path), []
+    def __init__(self, tmp_path, reply, kind="ASSEMBLY"):
+        self.client, self.store, self.calls, self.kind = FakeClient(reply), Store(tmp_path), [], kind
 
     def target(self, url):
         return {"did": "a" * 24, "wvm": "w", "wvmid": "b" * 24, "eid": "c" * 24}, ""
 
     async def call(self, operation, path=None, query=None, body=None):
+        if operation == "getElementsInDocument":
+            return [{"id": "c" * 24, "elementType": self.kind}]
         self.calls.append((operation, query))
-        return {"rootAssembly": {"instances": [{"id": "Mservo", "name": "servo <1>"}, {"id": "Msub", "name": "frame <1>"}],
+        if operation == "getPartsWMVE":
+            return [{"partId": "JFD", "name": "Part 1", "bodyType": "solid"}, {"partId": "JID", "name": "Part 2", "bodyType": "solid"},
+                    {"partId": "JKD", "name": "Sketch surface", "bodyType": "sheet"}, {"partId": "JGD", "name": "Group", "bodyType": "solid", "isCompositePart": True}]
+        return {"rootAssembly":{"instances": [{"id": "Mservo", "name": "servo <1>"}, {"id": "Msub", "name": "frame <1>"}],
                                  "occurrences": [{"path": ["Mservo"]}, {"path": ["Msub"]}, {"path": ["Msub", "Mbracket"]}]},
                 "subAssemblies": [{"instances": [{"id": "Mbracket", "name": "bracket <2>"}]}]}
 
@@ -103,3 +123,21 @@ def test_tool_passes_explicit_occurrences(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "svc", lambda: fake)
     asyncio.run(server.interference_check(URL, occurrence_paths=[["Mservo"], ["Msub", "Mbracket"]]))
     assert [o["path"] for o in fake.client.jobs[0]["body"]["occurrences"]] == [["Mservo"], ["Msub", "Mbracket"]]
+
+
+def test_tool_on_a_part_studio_checks_every_solid_part(tmp_path, monkeypatch):
+    fake = FakeService(tmp_path, PART_REPLY, kind="PARTSTUDIO")
+    monkeypatch.setattr(server, "svc", lambda: fake)
+    data = json.loads(asyncio.run(server.interference_check(URL)))
+    data = data.get("data", data)
+    assert data["pair_count"] == 1 and (data["interferences"][0]["a"], data["interferences"][0]["b"]) == ("Part 1", "Part 2")
+    assert data["checked_parts"] == 2 and data["revision_unchanged"] is True
+    # Sheets and composite parts are not solids to check; composites would double-count their members.
+    assert fake.client.jobs[0]["body"]["partIds"] == ["JFD", "JID"] and fake.client.jobs[0]["body"]["occurrences"] == []
+
+
+def test_tool_refuses_other_element_types(tmp_path, monkeypatch):
+    fake = FakeService(tmp_path, PART_REPLY, kind="DRAWING")
+    monkeypatch.setattr(server, "svc", lambda: fake)
+    with pytest.raises(OnshapeError, match="assembly or Part Studio"):
+        asyncio.run(server.interference_check(URL))
