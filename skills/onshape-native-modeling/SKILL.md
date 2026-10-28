@@ -137,9 +137,11 @@ Part Studio features (model the way a careful CAD user would):
   especially 3D-print fits: bores `nominal + 2*#fit_clr`, spigots
   `nominal - 2*#fit_clr`. Variables must come before the features that use them.
 - Group each part's or each larger change's features in a feature folder
-  (`sidebar_edit` `create_folder` with contiguous `node_ids`; `move` with
-  `allow_reorder=true` to place new variables earlier). Keep sizes out of feature
-  names once variables drive them.
+  (`sidebar_edit` `create_folder` with contiguous `node_ids`). To add features straight
+  into place, pass `feature(add, ..., before=<feature id>, folder=<folder id or name>)`:
+  it moves them in one verified reorder (e.g. new variables before the features that use
+  them) and reports regeneration errors. Keep sizes out of feature names once variables
+  drive them.
 - To replace a sketch's entities and constraints, POST the full feature to
   `.../features/featureid/{fid}` with `serializationVersion` and `sourceMicroversion`
   from a fresh `GET .../features`; this keeps the feature ID.

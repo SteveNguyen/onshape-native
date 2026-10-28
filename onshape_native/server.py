@@ -201,9 +201,48 @@ async def feature_template(snapshot: str, feature_type: str = "", namespace: str
 
 
 @mcp.tool(structured_output=False, annotations=WRITE)
-async def feature(snapshot: str, action: Literal["add", "edit"], changes: list[dict]) -> str:
-    """Add full native feature definitions or patch existing features. Edit shape: {id,parameters:{parameterId:expression_or_patch},name?,suppressed?}. Preserves unspecified fields. Sequential batch (1-20); stops on failure, no rollback. Uses server-enforced revision checks."""
-    return compact(await svc().feature(snapshot, action, changes))
+async def feature(snapshot: str, action: Literal["add", "edit"], changes: list[dict], before: str = "", folder: str = "") -> str:
+    """Add full native feature definitions or patch existing features. Edit shape: {id,parameters:{parameterId:expression_or_patch},name?,suppressed?}. Preserves unspecified fields. Sequential batch (1-20); stops on failure, no rollback. Uses server-enforced revision checks.
+    add only: before=feature id and/or folder=folder id or exact name places every added feature there (one native reorder, verified; regeneration errors are reported, e.g. a feature placed before one it depends on)."""
+    if (before or folder) and action != "add":
+        raise OnshapeError("before/folder placement is only for add.")
+    s = svc()
+    out = await s.feature(snapshot, action, changes)
+    if not (before or folder):
+        return compact(out)
+    if out.get("stopped") or not out.get("completed"):
+        return compact({**out, "placement": "not moved: the batch stopped; added features stay at the end of the tree."})
+    out["placement"] = await place(s, s.snapshot_data(snapshot), [c["id"] for c in out["completed"]], before, folder)
+    return compact(out)
+
+
+async def place(s, snap, feature_ids, before, folder):
+    """Move just-added features before a feature and/or into a folder, in one reorder checked by sidebar_edit."""
+    import asyncio
+    url, target = snap["url"], snap["target"]
+    structures = Structures(s)
+    data = await structures.capture_element(url)
+    rows = {r["id"]: r for r in data["rows"]}
+    parent = "root"
+    if folder:
+        matches = [r for r in data["rows"] if r["kind"] == "feature_folder" and folder in (r["id"], r.get("name"), "feature_folder:" + folder)]
+        if len(matches) != 1:
+            raise OnshapeError(f"Placement folder {folder!r} matches {len(matches)} folders; the features were added at the end, unmoved.")
+        parent = matches[0]["id"]
+    before_id = ""
+    if before:
+        before_id = before if before.startswith("feature:") else "feature:" + before
+        if before_id not in rows:
+            raise OnshapeError(f"Placement before {before!r}: no such feature; the features were added at the end, unmoved.")
+        if folder and rows[before_id]["parent_id"] != parent:
+            raise OnshapeError("Placement: the before feature is not inside that folder; the features were added at the end, unmoved.")
+        parent = rows[before_id]["parent_id"]
+    snapshot = s.store.put(data)["artifact"]
+    lock = s.locks.setdefault("structure:" + target["did"] + target["wvmid"], asyncio.Lock())  # same lock as sidebar_edit
+    async with lock:
+        moved = await structures.sidebar_edit(snapshot, "move", node_ids=["feature:" + f for f in feature_ids],
+                                              parent_id=parent, before_id=before_id, allow_reorder=True)
+    return {k: moved.get(k) for k in ("structure_verified", "regeneration_errors", "snapshot", "microversion", "error")}
 
 
 @mcp.tool(structured_output=False, annotations=WRITE)
