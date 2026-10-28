@@ -106,6 +106,29 @@ have backend operations. UI controls and native serializers can change with
 Onshape builds; report an actual unsupported operation rather than claiming
 every catalog candidate is verified.
 
+Part Studio features (model the way a careful CAD user would):
+
+- Fully constrain every sketch you add: tie it to existing geometry or the origin
+  (external query `qCreatedBy(makeId("Origin"), EntityType.VERTEX)`, or a `PROJECTED`
+  /`CONCENTRIC` reference to an existing edge) and drive every size. Give circles a
+  `centerId` of `<entityId>.center`; reference points as `<id>.center`, `<id>.start`
+  or `<id>.end`. Verify with `inspect_model`: `sketch_issues` must not list your
+  sketch. It checks every entity (`getSketchInfo`), because the sketch-level
+  status can say `WELL_DEFINED` while a point is still `UNDERDEFINED`.
+- Use variables (`assignVariable` features, `VariableMode` `ASSIGNED`, `VariableType`
+  `LENGTH`, set both `lengthValue` and `value`) for sizes likely to change,
+  especially 3D-print fits: bores `nominal + 2*#fit_clr`, spigots
+  `nominal - 2*#fit_clr`. Variables must come before the features that use them.
+- Group each part's or each larger change's features in a feature folder
+  (`sidebar_edit` `create_folder` with contiguous `node_ids`; `move` with
+  `allow_reorder=true` to place new variables earlier). Keep sizes out of feature
+  names once variables drive them.
+- To replace a sketch's entities and constraints, POST the full feature to
+  `.../features/featureid/{fid}` with `serializationVersion` and `sourceMicroversion`
+  from a fresh `GET .../features`; this keeps the feature ID.
+- An extrude with `startOffset` needs explicit `oppositeDirection` and
+  `startOffsetOppositeDirection` booleans; without them it can fail with REGEN_ERROR.
+
 Assemblies:
 
 - `getAssemblyDefinition` omits mates unless `includeMateFeatures=true` (and
@@ -116,6 +139,18 @@ Assemblies:
   feature IDs. Flip a mate with `primaryAxisAlignment` (`flipPrimary` is a mate
   connector parameter). Check feature specs (`featurespecs`) instead of guessing
   parameter IDs, then verify the solved pose with a render or capture.
+- Composite parts (common for imported STEP: one composite wrapping many loose bodies):
+  insert the composite with its own `partId` (`getPartsWMVE` lists it with
+  `isCompositePart`). `getAssemblyDefinition` hides composite instances unless
+  `includeNonSolids=true`, so an insert looks like a no-op without it. Never fall
+  back to `isWholePartStudio`: that inserts every loose body. Check with
+  `includeNonSolids=true` before retrying any insert.
+- To reproduce a known layout, place instances with `occurrencetransforms`
+  (`isRelative: false`, row-major 4x4, metres) and verify the read-back transform.
+  To make several placed instances rigid without moving them, add a group:
+  `BTMMateGroup-65` with parameter `occurrencesQuery` (not `occurrences`, which is
+  accepted but leaves the group in ERROR) listing `BTMIndividualOccurrenceQuery-626`
+  paths.
 - Face deterministic IDs change when the source Part Studio is edited: read them
   fresh (`evaluate` topology on the source Part Studio) before creating connectors.
 - Feature, instance and node IDs may contain `/` or `+`: URL-encode them in paths
