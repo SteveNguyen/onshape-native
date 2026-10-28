@@ -192,6 +192,14 @@ export function setTab(policy, ctx, eid, mode, now = Date.now()) {
   return p;
 }
 
+// "Add this tab": raises the open tab to `mode`, never lowers it and never touches other grants (unlike a preset).
+export function addTab(policy, ctx, mode, now = Date.now()) {
+  if (!MODES.includes(mode)) throw new Error("addTab: invalid mode");
+  const current = tabMode(policy, ctx.did, ctx.wid, ctx.eid);
+  if (max(current, mode) === current) return structuredClone(checkPolicy(policy));  // already at least `mode` (tab or whole branch)
+  return setTab(policy, ctx, ctx.eid, mode, now);
+}
+
 export function setAction(policy, did, action, on) {
   if (!ACTIONS.includes(action) || typeof on !== "boolean") throw new Error("setAction: invalid action");
   const p = structuredClone(checkPolicy(policy));

@@ -277,6 +277,24 @@ test("applyPreset leaves other branches and actions, creates the entry, is pure"
   assert.throws(() => applyPreset(p0, ctx, "nope"));
 });
 
+test("addTab raises only the open tab and keeps every other grant", async () => {
+  const {addTab, applyPreset} = await import("../extension/grants.js");
+  const p0 = applyPreset(pol({}), {...ctx, eid: E2}, "tab");  // another tab already has write
+  const before = structuredClone(p0);
+  const p1 = addTab(p0, ctx, "read");
+  assert.deepEqual(p0, before);  // pure
+  assert.equal(tabMode(p1, D, W, E), "read");
+  assert.equal(tabMode(p1, D, W, E2), "write");
+  assert.equal(p1.docs[D].branches[W].tabs[E].name, "Gripper finger");
+  assert.equal(tabMode(addTab(p1, ctx, "write"), D, W, E), "write");
+  // never lowers: the tab itself, or a whole-branch grant
+  assert.equal(tabMode(addTab(addTab(p1, ctx, "write"), ctx, "read"), D, W, E), "write");
+  const whole = applyPreset(pol({}), ctx, "branch");
+  assert.deepEqual(addTab(whole, ctx, "read"), whole);
+  assert.equal(addTab(pol({}), ctx, "read", 1234).docs[D].added, 1234);
+  assert.throws(() => addTab(p0, ctx, "owner"));
+});
+
 test("setTab sets the exact mode, null removes and prunes empties", async () => {
   const {setTab, applyPreset} = await import("../extension/grants.js");
   const p1 = setTab(pol({}), ctx, E2, "write");

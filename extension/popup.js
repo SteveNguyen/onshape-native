@@ -1,5 +1,5 @@
 import {didFromUrl, docName, docLabel, targetFromUrl} from "./policy.js";
-import {ACTIONS, PRESETS, actionOn, applyPreset, bound, branchMode, checkPolicy, createdGrantRevocations, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
+import {ACTIONS, PRESETS, actionOn, addTab, applyPreset, bound, branchMode, checkPolicy, createdGrantRevocations, effectivePolicy, presetOf, revokeDocument, setAction, seedFromCreated, setTab, summary, tabMode} from "./grants.js";
 import {approve, approveOnce, liveRequests} from "./requests.js";
 import {branchNames, tabsFromContents} from "./listings.js";
 
@@ -103,6 +103,14 @@ function banner(s, r) {
     return node;
   }
   node.append(el("div", {textContent: `Claude asks to ${describe(need)}`}));
+  // A tab request in this document links to the tab, so it can be looked at before allowing. Request ids are
+  // untrusted: only 24-hex ids go into the URL; a branch-free request opens it in the popup's branch.
+  const hex = v => typeof v === "string" && /^[0-9a-f]{24}$/i.test(v);
+  const wid = need.wid ?? (ctx?.wvm === "w" ? ctx.wid : null);
+  if (need.type === "tab" && need.did?.toLowerCase?.() === ctx?.did && hex(need.eid) && hex(wid)) {
+    const eid = need.eid.toLowerCase();
+    node.append(el("div", {className: "small"}, tabLink(ctx.tabs.find(t => t.eid === eid) ?? {eid, name: "", type: ""}, wid.toLowerCase(), "Open this tab")));
+  }
   if (reasons.has(r.id)) node.append(el("div", {className: "warn small", textContent: reasons.get(r.id)}));
   node.append(el("div", {className: "row"}, el("button", {textContent: "Allow", onclick: async () => {
     const s = await load();
@@ -140,6 +148,19 @@ function renderPresets(s) {
   sec.replaceChildren(...[...PRESETS, "custom"].map(p => el("label", {}, el("input", {type: "radio", name: "preset", checked: now === p,
     onchange: async () => { if (p === "custom") { $("custom").open = true; return; }
       await narrowCreated(); await change(base => applyPreset(base, ctx, p), ctx.did); }}), labels[p])));
+  // "Add this tab" keeps every other grant (a preset replaces them); a button disappears once the tab has that level.
+  const mode = tabMode(s.eff, ctx.did, ctx.wid, ctx.eid);
+  const add = (label, m) => el("button", {textContent: label, hidden: mode === "write" || mode === m,
+    onclick: () => change(base => addTab(base, ctx, m), ctx.did)});
+  sec.append(el("div", {className: "row add"}, add("Add this tab: read", "read"), add("Add this tab: read + write", "write")));
+}
+// Opens a tab of this document and branch: click reuses the current browser tab, Ctrl/Cmd or middle click opens a new one.
+function tabLink(t, wid = ctx.wid, text = tabLabel(t)) {
+  const url = `https://cad.onshape.com/documents/${ctx.did}/w/${wid}/e/${t.eid}`;
+  const go = e => { e.preventDefault();
+    if (e.ctrlKey || e.metaKey || e.button === 1) chrome.tabs.create({url, active: false});
+    else chrome.tabs.query({active: true, currentWindow: true}).then(([tab]) => tab && chrome.tabs.update(tab.id, {url})); };
+  return el("a", {className: "grow title", href: url, textContent: text, title: "Open this tab (Ctrl+click: new browser tab)", onclick: go, onauxclick: e => e.button === 1 && go(e)});
 }
 function treeRow(s, t) {
   const mode = tabMode(s.eff, ctx.did, ctx.wid, t.eid), whole = branchMode(s.eff, ctx.did, ctx.wid);
@@ -148,7 +169,7 @@ function treeRow(s, t) {
       const mode = set(e.target.checked);
       await narrowCreated(t.eid); await change(base => setTab(base, ctx, t.eid, mode), ctx.did); }}), label);
   // Write ticks Read; unticking Read clears the tab.
-  return el("div", {className: "row trow" + (t.eid === ctx.eid ? " open" : "")}, el("span", {className: "grow title", textContent: tabLabel(t)}),
+  return el("div", {className: "row trow" + (t.eid === ctx.eid ? " open" : "")}, tabLink(t),
     box("R", !!mode, !!whole, on => on ? "read" : null), box("W", mode === "write", whole === "write", on => on ? "write" : "read"));
 }
 function renderTree(s) {
