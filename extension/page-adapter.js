@@ -4,6 +4,7 @@ export async function pageCommand(job) {
   "use strict";
   try {
   const MAX = 64 * 1024 * 1024;
+  const NATIVE_TIMEOUT = 60000;
   const target = job.target;
   if (location.origin !== "https://cad.onshape.com") throw new Error("Wrong origin.");
   if (target && location.pathname !== `/documents/${target.did}/w/${target.wid}/e/${target.eid}`) {
@@ -240,11 +241,22 @@ export async function pageCommand(job) {
   // correlation; an invented UUID is not a documented editor message ID.
   if (Object.hasOwn(message, "messageId")) message.messageId = new Type().messageId;
   const before = getMicroversion();
-  const connection = controller.elementConnection;
+  // Measure belongs to the document connection and reports to one 3D view: the editor's measurement panel
+  // sends it there with its viewer's id (createMeasureCallForSelections).
+  const onDocument = job.command === "ui.GBTUiMeasureCall";
+  if (onDocument) {
+    message.viewerId = controller.getViewer?.()?.getViewerId?.() || "";
+    if (!message.viewerId) throw new Error("Editor 3D view unavailable for Measure; nothing was sent.");
+  }
+  const connection = onDocument ? controller.connection : controller.elementConnection;
   if (typeof connection?.callAndPromise !== "function") throw new Error("Native editor connection unavailable.");
   // The editor allocates call IDs, serializes typed messages, and correlates replies.
   // Never replay captured bytes: their IDs and transaction state are session-specific.
-  const result = await connection.callAndPromise(message);
+  // A command the editor never answers must not hold the extension's single command slot.
+  let timer;
+  const silent = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(
+    `No reply from the editor within ${NATIVE_TIMEOUT / 1000} s; outcome unknown. Inspect state before retrying.`)), NATIVE_TIMEOUT); });
+  const result = await Promise.race([connection.callAndPromise(message), silent]).finally(() => clearTimeout(timer));
   return bounded({result: plain(result), microversion_before: before, microversion_after: getMicroversion(),
     next: "Read native_state and check regeneration; an acknowledgement alone does not prove correct geometry."});
   } catch (error) {

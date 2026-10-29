@@ -147,3 +147,18 @@ test("only the extension's own popup can drive the connection", async t => {
   assert.equal(replied, false);
   assert.notEqual(FakeSocket.made[0].readyState, FakeSocket.CLOSED);
 });
+
+test("a null tab_id (as Python sends it) selects the single tab showing the target element", async t => {
+  const policy = {version: 2, docs: {[D]: {branches: {[W]: {tabs: {[E]: {mode: "read"}}}}}}};
+  const {chrome} = await load(t, {local: {enabled: true, policy}});
+  const tab = {id: 7, url: `https://cad.onshape.com/documents/${D}/w/${W}/e/${E}`, active: false, windowId: 1};
+  chrome.tabs.query = async () => [tab];
+  const ran = [];
+  chrome.scripting = {executeScript: async ({target}) => { ran.push(target.tabId); return [{result: {microversion: "m"}}]; }};
+  const socket = FakeSocket.made[0];
+  await handshake(socket);
+  await socket.deliver({type: "command", id: "1", job: {kind: "state", target: {did: D, wid: W, eid: E}, tab_id: null}});
+  const result = socket.sent.find(m => m.type === "result").result;
+  assert.equal(result.error, undefined);
+  assert.deepEqual(ran, [7]);
+});

@@ -23,10 +23,12 @@ async function resolveTab(job) {
     const {did, wid, eid} = job.target;
     const pathname = `/documents/${did}/w/${wid}/e/${eid}`;
     const matches = tabs.filter(t => new URL(t.url).pathname === pathname);
-    if (job.tab_id === undefined && matches.length === 1) return matches[0];
+    // Python sends tab_id null when none is given.
+    if (job.tab_id == null && matches.length === 1) return matches[0];
     const selected = matches.find(t => t.id === job.tab_id);
     if (selected) return selected;
-    throw new Error(matches.length ? "Multiple matching tabs; provide tab_id from bridge_status." : "Open the exact target workspace/element in Comet.");
+    if (!matches.length) throw new Error("Open the exact target workspace/element in Comet.");
+    throw new Error(job.tab_id == null ? "Multiple matching tabs; provide tab_id from bridge_status." : "That tab_id does not show the target element; see bridge_status.");
   }
   const selected = job.tab_id ? tabs.find(t => t.id === job.tab_id) : tabs.find(t => t.active) || tabs[0];
   if (!selected) throw new Error("Open an Onshape tab in Comet.");

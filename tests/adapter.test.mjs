@@ -135,3 +135,30 @@ test('missing message classes fail before native RPC',async()=>{
   const modules=setup(undefined,true);delete modules[96402].CJP;
   assert.match((await pageCommand({kind:'state',target})).error,/96402:message-classes-missing/);assert.equal(sent.length,0);
 });
+
+class Measure {
+  constructor(){this.elementId='';this.messageId='';this.viewerId='';this.entityQueries=[];}
+  getMessageName(){return 'ui.GBTUiMeasureCall';}
+}
+
+test('Measure goes on the document connection with the 3D view id, like the editor measurement panel',async()=>{
+  const modules=setup();modules[27940].Measure=Measure;
+  const controller=modules[3392].GI.getOpenDocumentController();
+  const onDocument=[];
+  controller.connection={isClosed:()=>false,callAndPromise:async m=>{onDocument.push(m);return {measurements:[]};}};
+  controller.getViewer=()=>({getViewerId:()=>'viewer-1'});
+  const result=await pageCommand({kind:'native',target,command:'ui.GBTUiMeasureCall',body:{}});
+  assert.equal(result.error,undefined);
+  assert.equal(sent.length,0);assert.equal(onDocument.length,1);
+  assert.equal(onDocument[0].viewerId,'viewer-1');
+});
+
+test('a native call the editor never answers ends after 60 s instead of holding the extension',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const job={kind:'native',target,command:'partstudiofolders.GBTUiCreateFolder',expected_microversion:micro,body:{folderName:'T'}};
+  const modules=setup();modules[3392].GI.getOpenDocumentController().elementConnection.callAndPromise=()=>new Promise(()=>{});
+  const pending=pageCommand(job);
+  await new Promise(resolve=>setImmediate(resolve));
+  t.mock.timers.tick(60000);
+  assert.match((await pending).error,/No reply from the editor within 60 s/);
+});
