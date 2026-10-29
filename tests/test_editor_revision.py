@@ -57,3 +57,13 @@ def test_an_editor_lagging_behind_our_own_write_is_not_trusted(tmp_path):
     s.written[(D, W)] = M2  # this process just wrote M2 through REST; the editor still shows M1
     asyncio.run(s.inspect(URL, geometry=False))
     assert s.rest == [("getPartStudioFeatures", "w", W)]
+
+
+def test_once_the_editor_caught_up_with_our_write_its_later_revisions_are_trusted(tmp_path):
+    micro = [M2]
+    s = service(tmp_path, lambda: micro[0])
+    s.written[(D, W)] = M2  # the editor already shows our write
+    asyncio.run(s.inspect(URL, geometry=False))
+    micro[0] = M3 = "3" * 24  # then a sidebar edit made in the editor itself
+    asyncio.run(s.inspect(URL, geometry=False))
+    assert s.rest == [("getPartStudioFeatures", "m", M2), ("getPartStudioFeatures", "m", M3)]

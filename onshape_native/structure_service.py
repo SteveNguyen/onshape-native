@@ -73,9 +73,8 @@ class Structures:
         # the reads pinned to it are served from the client cache while nothing changes. After one of our REST writes
         # the editor may lag; then the REST revision is used and the check below refuses a mismatched editor.
         native = await self.ready_state(target) if target["wvm"] == "w" and not target["configuration"] else None
-        written = self.s.written.get((target["did"], target["wvmid"]))
         trusted = native and re.fullmatch(r"[a-f0-9]{24}", native.get("microversion") or "") and \
-            native.get("connected", True) and (not written or native["microversion"] == written)
+            native.get("connected", True) and self.s.editor_caught_up(target["did"], target["wvmid"], native["microversion"])
         document = await self.capture_document(url, native["microversion"] if trusted else None)
         element = next((e for e in document["contents"]["elements"] if e["id"] == target["eid"]), None)
         if element is None: raise OnshapeError("Element is absent at this revision.")

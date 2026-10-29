@@ -8,6 +8,7 @@ from onshape_native.store import Store
 from onshape_native.structures import document_rows, feature_rows, assembly_rows, assembly_sidebar_rows, target_from_url, page_tree
 from onshape_native.structure_service import Structures
 from onshape_native.catalog import Catalog
+from onshape_native.service import Service
 
 D, W, E, H = "a"*24, "b"*24, "c"*24, "d"*24
 M, OLD = "e"*24, "f"*24
@@ -152,6 +153,7 @@ class FakeService:
     def __init__(self, tmp_path):
         self.store=Store(tmp_path);self.client=FakeClient();self.catalog=Catalog();self.micro=M;self.calls=[];self.content=contents()
         self.written={}
+    editor_caught_up=Service.editor_caught_up
     async def call(self, name, path, query=None, body=None):
         self.calls.append((name,path,query,body))
         if name=="getCurrentMicroversion":return {"microversion":self.micro}

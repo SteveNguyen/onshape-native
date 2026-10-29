@@ -444,8 +444,10 @@ async def native_write(url: str, command: str, body: dict, expected_microversion
     """Send a schema-discovered native modeling command using the editor's serializer and connection. Some commands are untested: inspect native_catalog and native_schema first. Revision preflight is NOT atomic against collaborators. No retry/rollback; inspect state and regeneration afterward."""
     if command in READS:
         raise OnshapeError("Use native_read for read commands.")
-    data = await svc().client.command({"kind": "native", "target": native_target(url), "command": command,
+    target = native_target(url)
+    data = await svc().client.command({"kind": "native", "target": target, "command": command,
                                        "body": body, "expected_microversion": expected_microversion, "tab_id": tab_id})
+    svc().editor_caught_up(target["did"], target["wid"], expected_microversion)  # it ran, so the editor was at this revision
     return compact(svc().store.response(data))
 
 

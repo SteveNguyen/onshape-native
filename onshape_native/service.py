@@ -31,10 +31,18 @@ class Service:
         except OnshapeError:
             return None  # no open tab for this element (or several): use the REST read
         micro = state.get("microversion")
-        written = self.written.get((target["did"], target["wvmid"]))
-        if not micro or not state.get("connected", True) or (written and micro != written):
+        if not micro or not state.get("connected", True) or not self.editor_caught_up(target["did"], target["wvmid"], micro):
             return None
         return micro
+
+    def editor_caught_up(self, did, wid, micro):
+        """False while the editor still lags behind our last REST write. Once it shows that write, the guard is dropped:
+        any later revision it shows is a newer edit (made in the editor itself, or by a collaborator)."""
+        written = self.written.get((did, wid))
+        if written and micro != written:
+            return False
+        self.written.pop((did, wid), None)
+        return True
 
     async def call(self, operation, path=None, query=None, body=None):
         method, url = self.catalog.resolve(operation, path or {}, query)
