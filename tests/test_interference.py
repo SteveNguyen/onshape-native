@@ -141,3 +141,34 @@ def test_tool_refuses_other_element_types(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "svc", lambda: fake)
     with pytest.raises(OnshapeError, match="assembly or Part Studio"):
         asyncio.run(server.interference_check(URL))
+
+
+# Onshape reuses one overlap body for every pair with the same geometry; its box sits at the first pair's place.
+def shifted(dx_mm):
+    m = [1, 0, 0, dx_mm / 1000, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    return m
+
+
+SHARED = {"$type": "ui.GBTUiInterferenceResponse", "error": 0,
+          "interferences": [{"$type": "GBTUiAssemblyInterference", "interferenceBodiesKeys": ["k"],
+                             "occurrence1": {"path": ["S1", "Pa"]}, "occurrence2": {"path": ["S1", "Pb"]}},
+                            {"$type": "GBTUiAssemblyInterference", "interferenceBodiesKeys": ["k"],
+                             "occurrence1": {"path": ["S2", "Pb"]}, "occurrence2": {"path": ["S2", "Pa"]}}],
+          "interferenceBodies": {"k": body([0.002, 0.002, 0.002], [0.0, 0.0, 0.0])}}
+# S2 is S1 moved 100 mm along x; Pa/Pb are instances of the same part (same definition) inside each copy.
+PLACES = {("S1", "Pa"): shifted(0), ("S1", "Pb"): shifted(0), ("S2", "Pa"): shifted(100), ("S2", "Pb"): shifted(100)}
+PARTS = {("S1", "Pa"): "P", ("S1", "Pb"): "P", ("S2", "Pa"): "P", ("S2", "Pb"): "P"}
+
+
+def test_a_reused_overlap_body_is_moved_to_its_own_pair():
+    out = summarize(SHARED, {}, PLACES, PARTS)
+    first, second = (p["overlaps"][0] for p in out["interferences"])
+    assert first["min_mm"] == [-1.0, -1.0, -1.0]
+    assert second["min_mm"] == [99.0, -1.0, -1.0] and second["max_mm"] == [101.0, 1.0, 1.0]
+    assert second["shared_with_pair"] == 1
+
+
+def test_a_reused_body_without_a_consistent_move_reports_no_box_rather_than_a_wrong_one():
+    places = {**PLACES, ("S2", "Pa"): shifted(300)}  # the two parts did not move together
+    second = summarize(SHARED, {}, places, PARTS)["interferences"][1]["overlaps"][0]
+    assert "min_mm" not in second and second["shared_with_pair"] == 1 and "not computed" in second["position"]

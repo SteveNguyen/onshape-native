@@ -417,18 +417,24 @@ async def interference_check(url: str, occurrence_paths: list[list[str]] | None 
     if kind == "ASSEMBLY":
         definition = await s.call("getAssemblyDefinition", path, {"includeNonSolids": "true", "excludeSuppressed": "true"})
         root = definition["rootAssembly"]
-        names = {i["id"]: i["name"] for a in [root, *definition.get("subAssemblies", [])] for i in a.get("instances", [])}
+        instances = {i["id"]: i for a in [root, *definition.get("subAssemblies", [])] for i in a.get("instances", [])}
+        names = {k: i["name"] for k, i in instances.items()}
+        # Positions and part definitions let a reused overlap body be placed at each pair's own position.
+        places = {tuple(o["path"]): o["transform"] for o in root.get("occurrences", []) if len(o.get("transform", [])) == 16}
+        parts = {tuple(o["path"]): tuple(instances.get(o["path"][-1], {}).get(k) for k in ("documentId", "elementId", "partId", "configuration"))
+                 for o in root.get("occurrences", [])}
         paths = occurrence_paths or [o["path"] for o in root.get("occurrences", []) if len(o["path"]) == 1]
         body, checked = interference.request_body(paths, include_standard_content=include_standard_content), {"checked_occurrences": len(paths)}
     elif kind == "PARTSTUDIO":
         # Composite parts are left out: their member bodies are checked already.
-        parts = [p for p in await s.call("getPartsWMVE", path) if p.get("bodyType") == "solid" and not p.get("isCompositePart")]
-        names = {p["partId"]: p.get("name") or p["partId"] for p in parts}
+        solids = [p for p in await s.call("getPartsWMVE", path) if p.get("bodyType") == "solid" and not p.get("isCompositePart")]
+        names = {p["partId"]: p.get("name") or p["partId"] for p in solids}
+        places = parts = None  # each Part Studio pair has its own body
         body, checked = interference.request_body(part_ids=list(names)), {"checked_parts": len(names)}
     else:
         raise OnshapeError("Interference checks need an assembly or Part Studio element.")
     data = await s.client.command({"kind": "native", "target": target, "command": interference.COMMAND, "body": body, "tab_id": tab_id})
-    report = {**interference.summarize(data.get("result") or {}, names), **checked,
+    report = {**interference.summarize(data.get("result") or {}, names, places, parts), **checked,
               "revision_unchanged": data.get("microversion_before") == data.get("microversion_after")}
     return compact(s.store.response(report))
 
