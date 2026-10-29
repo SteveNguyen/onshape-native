@@ -178,6 +178,13 @@ Assemblies:
   mm: locate it on both parts before choosing a fix, and adapt
   the feature that causes it (e.g. a dimension from the part the design was made
   for) rather than patching around it.
+- To verify a fit you designed (bore/shaft, two flat faces), use `measure_fit` on
+  those two faces with the expected clearance range (e.g. from `2*#fit_clr`): it
+  runs Onshape's Measure in the editor (no REST) and reports diameters, diametral
+  clearance, tightest gap, axis offset and angle. It is a targeted check, not a
+  scan: pick the faces of the fit, never sweep all pairs. For a close-up, zoom
+  `view_control` to `box_mm` (e.g. an interference box) or `part_ids`, then
+  `capture_viewport`; restore the camera afterwards.
 - Face deterministic IDs change when the source Part Studio is edited: read them
   fresh (`evaluate` topology on the source Part Studio) before creating connectors.
 - Feature, instance and node IDs may contain `/` or `+`: URL-encode them in paths

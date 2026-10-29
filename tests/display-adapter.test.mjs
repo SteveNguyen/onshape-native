@@ -4,6 +4,13 @@ import {webcrypto} from 'node:crypto';
 import {displayCommand} from '../extension/display-adapter.js';
 const target={did:'a'.repeat(24),wid:'b'.repeat(24),eid:'c'.repeat(24)}, micro='d'.repeat(24);
 const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+// Onshape's 3D bounds (webgl bundle): set(min,max), clone, addBox, isFinite.
+class Box {
+ constructor(min=[0,0,0],max=[1,1,1]){this.min=[...min];this.max=[...max];}
+ clone(){return new Box(this.min,this.max);} set(min,max){this.min=[...min];this.max=[...max];}
+ addBox(b){for(let i=0;i<3;i++){this.min[i]=Math.min(this.min[i],b.min[i]);this.max[i]=Math.max(this.max[i],b.max[i]);}}
+ isFinite(){return this.min.every(Number.isFinite)&&this.max.every(Number.isFinite);}
+}
 function setup({parentHidden=false,offline=false,current=false,partStudio=false,section=true}={}) {
  globalThis.crypto ||= webcrypto;globalThis.location={origin:'https://cad.onshape.com',pathname:`/documents/${target.did}/w/${target.wid}/e/${target.eid}`,search:''};
  const sent=[],transforms=new Map([['part',identity.slice()]]);
@@ -34,7 +41,8 @@ function setup({parentHidden=false,offline=false,current=false,partStudio=false,
  const manager={hasGraphicsOccurrenceData:()=>true,getOccurrenceTransform:()=>identity.slice(),
   batchUpdateOccurrenceTransforms:changes=>{for(const c of changes)transforms.set(c.pathId,[...c.transform]);return true;},
   getOccurrencesStartingWithPath:o=>o.path[0]==='part'?[o]:[],
-  getDisplayedPartStudio:()=>({getBodyComponent:()=>({getBodyOccurrenceData:id=>id==='JHD'?{}:undefined})})};
+  getDisplayedPartStudio:()=>({getBodyComponent:()=>({getBodyOccurrenceData:id=>id==='JHD'?{}:undefined})}),
+ getOccurrenceBounds:o=>o.path[0]==='part'?new Box([0,0,0],[0.01,0.01,0.01]):null,getBodyBounds:id=>id==='JHD'?new Box([0.1,0.1,0.1],[0.2,0.2,0.2]):null};
  // Onshape's isolate/make-transparent managers: assembly effects key occurrences by path, Part Studio by part id.
  const effect=()=>({affected:partStudio?new Set():new Map(),affectId(o){this.affected.set(o.getPathAsString(),o);},
   affectParts(parts,v){assert.equal(v,viewer);this.affected=new Set(parts.map(p=>p.id));},getAffectedPartOrOccurrenceIds(){return this.affected;},
@@ -45,9 +53,10 @@ function setup({parentHidden=false,offline=false,current=false,partStudio=false,
   onMakeTransparentComponents(node,include,selections,v){assert.deepEqual([node,include,selections,v],[null,false,null,viewer]);this.currentMakeTransparentManager=effect();},
   onMakeTransparentParts(parts,v){this.currentMakeTransparentManager=effect();this.currentMakeTransparentManager.affectParts(parts,v);},
   removeMakeTransparentManager(){this.currentMakeTransparentManager=null;}};
- const view={updateCameraNearFar(){},afterViewChange(){},getZoomFitTargetCamera:frame=>cameraAt(frame)};
+ const zoomed=[];
+ const view={updateCameraNearFar(){},afterViewChange(){},getZoomFitTargetCamera:(frame,bounds)=>{zoomed.push(bounds);return cameraAt(frame);}};
  const viewer={getOccurrenceIdManager:()=>({getIdForName:path=>path==='part'?1:-1}),getOccurrenceDataManager:()=>({getOccurrenceTransform:()=>transforms.get('part')}),getModelViewManagers:()=>({getManager:()=>manager}),getCamera:()=>camera,draw:()=>{},
-  getPrimaryViewController:()=>view,getFitBounds:()=>({}),supportsGraphicalSectionPlanes:()=>section,getIsolatedOccurrenceManager:()=>iso,isIsolateEffectInUseForVisualization:()=>false};
+  getPrimaryViewController:()=>view,getFitBounds:()=>new Box(),supportsGraphicalSectionPlanes:()=>section,getIsolatedOccurrenceManager:()=>iso,isIsolateEffectInUseForVisualization:()=>false};
  const connection={};
  const controller={connection:{isClosed:()=>closed},getActiveElementTabId:()=>target.eid,getViewer:()=>viewer,getElementConnection:()=>connection,
   documentModel:{get:k=>k==='microversionId'?{theId:revision}:{get:()=>'',isAssembly:()=>!partStudio,definition:{assemblyTree:tree}}},
@@ -66,7 +75,7 @@ function setup({parentHidden=false,offline=false,current=false,partStudio=false,
  if(current) modules[41413]={aL7:()=>({getElementId:()=>target.eid}),ejz:()=>structuredClone(sectioned.planes),
   Q0t:(planes,conn,v)=>{assert.equal(conn,connection);assert.equal(v,viewer);sectioned.calls.push(structuredClone(planes));sectioned.planes=structuredClone(planes);}};
  const chunks=[];chunks.push=value=>{Array.prototype.push.call(chunks,value);value[2](id=>{if(!(id in modules))throw new TypeError('module factory missing');return modules[id];});};globalThis.webpackChunkNewton=chunks;
- return {modules,sent,connector,mate,transforms,rotated,camera,sectioned,iso,setRevision:v=>revision=v,setClosed:v=>closed=v};
+ return {modules,sent,connector,mate,transforms,rotated,camera,sectioned,iso,zoomed,setRevision:v=>revision=v,setClosed:v=>closed=v};
 }
 const run=(operation,args={},extra={})=>displayCommand({kind:'display',target,operation,args,expected_microversion:micro,...extra});
 const fingerprint=state=>state.rows.map(r=>[r.tree_path,r.visibility,r.parent_hidden,r.suppressed,r.suppressed_by_parent]);
@@ -164,4 +173,17 @@ test('Part Studio isolate and make transparent take part ids',async()=>{
  await run('camera',{action:'exit_isolate'});
  assert.equal((await run('camera',{action:'make_transparent',part_ids:['JHD']})).verified,true);
  assert.equal((await run('camera',{action:'exit_make_transparent'})).verified,true);
+});
+test('zoom frames an exact box or Part Studio parts, without changing the model',async()=>{
+ let env=setup({current:true,partStudio:true});
+ const boxed=await run('camera',{action:'zoom',box:[0.001,0.002,0.003,0.004,0.005,0.006]});
+ assert.equal(boxed.applied,true);
+ assert.deepEqual([env.zoomed[0].min,env.zoomed[0].max],[[0.001,0.002,0.003],[0.004,0.005,0.006]]);
+ await run('camera',{action:'zoom',part_ids:['JHD']});
+ assert.deepEqual([env.zoomed[1].min,env.zoomed[1].max],[[0.1,0.1,0.1],[0.2,0.2,0.2]]);
+ assert.match((await run('camera',{action:'zoom',part_ids:['NOPE']})).error,/Zoom target bounds unavailable/);
+ assert.equal(env.sent.length,0);
+ env=setup({current:true});
+ await run('camera',{action:'zoom',occurrence_paths:[['part']]});
+ assert.deepEqual(env.zoomed[0].max,[0.01,0.01,0.01]);
 });

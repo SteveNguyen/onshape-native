@@ -88,7 +88,7 @@ def validate_display_job(job):
     if not isinstance(args, dict): raise ValueError('Display args must be an object.')
     fields = {
         'inspect': set(), 'visibility': {'changes','expected_state'},
-        'camera': {'action','view','frame','fit','occurrence_paths','camera_id','extents','plane','part_ids'},
+        'camera': {'action','view','frame','fit','occurrence_paths','camera_id','extents','plane','part_ids','box'},
         'capture': {'max_size'},
         'motion': {'action','mate','frames','start_degrees','end_degrees','session_id','frame','fps'},
     }
@@ -105,12 +105,20 @@ def validate_display_job(job):
         if action not in CAMERA_ACTIONS: raise ValueError('Unknown camera action.')
         if ('plane' in args) != (action in {'normal_to','section'}): raise ValueError('normal_to and section (only) take a plane.')
         if 'plane' in args: valid_plane(args['plane'])
-        if action in {'isolate','make_transparent'}:
-            if ('occurrence_paths' in args) == ('part_ids' in args): raise ValueError('Give assembly occurrence_paths or Part Studio part_ids.')
+        if 'box' in args and action!='zoom': raise ValueError('box applies to zoom.')
+        if action in {'isolate','make_transparent','zoom'}:
+            given=[k for k in ('occurrence_paths','part_ids','box') if k in args]
+            if len(given)!=1 or (action!='zoom' and given==['box']):
+                raise ValueError('Give assembly occurrence_paths or Part Studio part_ids' + (', or a box,' if action=='zoom' else '') + ' (exactly one).')
+            if 'part_ids' in args and (not isinstance(args['part_ids'],list) or not 1<=len(args['part_ids'])<=100 or len(set(args['part_ids']))!=len(args['part_ids'])
+                    or any(not isinstance(p,str) or not PART_ID.fullmatch(p) for p in args['part_ids'])): raise ValueError('Provide 1–100 distinct part IDs.')
+            if 'box' in args:
+                box=args['box']
+                if not isinstance(box,list) or len(box)!=6 or any(type(x) not in (int,float) or not math.isfinite(x) for x in box) or any(box[i]>box[i+3] for i in range(3)):
+                    raise ValueError('box is [xmin, ymin, zmin, xmax, ymax, zmax] in metres, element frame.')
             if 'occurrence_paths' in args: action='zoom'  # same occurrence path checks below
-            elif not isinstance(args['part_ids'],list) or not 1<=len(args['part_ids'])<=100 or len(set(args['part_ids']))!=len(args['part_ids']) \
-                    or any(not isinstance(p,str) or not PART_ID.fullmatch(p) for p in args['part_ids']): raise ValueError('Provide 1–100 distinct part IDs.')
-        elif 'part_ids' in args: raise ValueError('part_ids apply to isolate/make_transparent.')
+            else: action=None
+        elif 'part_ids' in args: raise ValueError('part_ids apply to isolate/make_transparent/zoom.')
         if action=='restore' and (not isinstance(args.get('camera_id'),str) or not 1<=len(args['camera_id'])<=128): raise ValueError('Use camera_id returned by save.')
         if 'fit' in args and type(args['fit']) is not bool: raise ValueError('fit must be boolean.')
         if 'extents' in args:

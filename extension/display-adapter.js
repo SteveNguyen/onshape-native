@@ -314,8 +314,12 @@ export async function displayCommand(job) {
       if(args.action==='fit'||args.action==='zoom'||args.fit===true) {
         let bounds=viewer.getFitBounds();
         if(args.action==='zoom') {
-          const all=args.occurrence_paths.map(p=>manager.getOccurrenceBounds(occurrence(p)));
-          if(!all.length||all.some(b=>!b?.isFinite())) throw new Error('Occurrence bounds unavailable. No zoom applied.');
+          // An exact box (metres, element frame) reuses Onshape's own bounds type: set(min,max) on a clone.
+          const box=args.box&&bounds?.clone?.();
+          if(box) box.set(args.box.slice(0,3),args.box.slice(3));
+          const all=args.box?[box]:args.part_ids?args.part_ids.map(id=>manager.getBodyBounds(id))
+            :args.occurrence_paths.map(p=>manager.getOccurrenceBounds(occurrence(p)));
+          if(!all.length||all.some(b=>!b?.isFinite())) throw new Error('Zoom target bounds unavailable. No zoom applied.');
           bounds=all[0].clone(); for(const b of all.slice(1)) bounds.addBox(b);
         }
         const fitted=view.getZoomFitTargetCamera(viewer.getCamera().getFrame(),bounds);

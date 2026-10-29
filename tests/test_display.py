@@ -74,3 +74,33 @@ def test_snapshot_paging_keeps_exact_display_tab_and_fingerprint(tmp_path):
     assert saved['tab_id']==77
     assert saved['expected_state']==[['instance.mate',1,False,False,False]]
     assert d.page(saved,snapshot,0,10)['data']==rows
+
+
+@pytest.mark.parametrize('args',[
+ {'action':'zoom','box':[0,0,0,0.01,0.01,0.01]},
+ {'action':'zoom','part_ids':['JKD']},
+ {'action':'zoom','occurrence_paths':[['MpLBWsAGviJgbfSTU']]},
+])
+def test_zoom_takes_exactly_one_of_box_parts_or_occurrences(args):
+    assert validate_job(job('camera',args))
+
+
+@pytest.mark.parametrize('args',[
+ {'action':'zoom'},
+ {'action':'zoom','box':[0,0,0,0.01,0.01,0.01],'part_ids':['JKD']},
+ {'action':'zoom','box':[0,0,0,0.01,0.01]},
+ {'action':'zoom','box':[0,0,0,0.01,-0.01,0.01]},
+ {'action':'zoom','box':[0,0,0,float('nan'),0.01,0.01]},
+ {'action':'zoom','part_ids':['bad id']},
+ {'action':'fit','box':[0,0,0,0.01,0.01,0.01]},
+])
+def test_malformed_zoom_targets_are_rejected(args):
+    with pytest.raises(BridgeError): validate_job(job('camera',args))
+
+
+def test_zoom_box_in_mm_becomes_metres_with_a_margin():
+    from onshape_native.server import zoom_box
+    from onshape_native.client import OnshapeError
+    # 10 mm wide in x: 2 mm margin; flat in z: the 1 mm minimum.
+    assert zoom_box([0, 0, 5, 10, 20, 5]) == pytest.approx([-0.002, -0.004, 0.004, 0.012, 0.024, 0.006])
+    with pytest.raises(OnshapeError): zoom_box([0, 0, 0, -1, 1, 1])

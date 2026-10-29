@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw
 
 from .bridge import running_bridge
 from .native_catalog import catalog as native_commands, READS
-from . import interference
+from . import interference, measure
 from .discovery import index as command_index
 from .structure_service import Structures
 from .client import OnshapeError
@@ -439,6 +439,25 @@ async def interference_check(url: str, occurrence_paths: list[list[str]] | None 
     return compact(s.store.response(report))
 
 
+@mcp.tool(structured_output=False, annotations=READ)
+async def measure_fit(url: str, a: dict, b: dict, expect_mm: list[float] | None = None, tab_id: int | None = None) -> str:
+    """Verify one named fit with Onshape's own Measure tool in the open editor tab (read-only, no REST): two faces you know
+    should fit, e.g. a bore and its shaft, or two flat faces. Entities: {face_id} in a Part Studio, {occurrence_path,
+    face_id} in an assembly (face IDs from evaluate topology in the part's Part Studio). Cylinder pairs: bore/shaft
+    diameters, diametral clearance, tightest radial gap, axis offset and angle. Parallel faces: gap. Any pair: min/max
+    distance and angle. expect_mm=[min, max] checks the diametral clearance or the gap; there is no default."""
+    s = svc()
+    target = native_target(url)
+    replies = []
+    for entities in ([a], [b], [a, b]):
+        data = await s.client.command({"kind": "native", "target": target, "command": measure.COMMAND,
+                                       "body": {"entityQueries": [measure.query(e) for e in entities]}, "tab_id": tab_id})
+        replies.append(data)
+    report = {**measure.fit(*(r.get("result") or {} for r in replies), expect_mm=expect_mm),
+              "revision_unchanged": len({r.get("microversion_before") for r in replies} | {r.get("microversion_after") for r in replies}) == 1}
+    return compact(s.store.response(report))
+
+
 @mcp.tool(structured_output=False, annotations=WRITE)
 async def native_write(url: str, command: str, body: dict, expected_microversion: str, tab_id: int | None = None) -> str:
     """Send a schema-discovered native modeling command using the editor's serializer and connection. Some commands are untested: inspect native_catalog and native_schema first. Revision preflight is NOT atomic against collaborators. No retry/rollback; inspect state and regeneration afterward."""
@@ -604,9 +623,11 @@ async def view_control(url: str, action: Literal['read','save','restore','standa
                        view: Literal['front','back','left','right','top','bottom','isometric'] = 'isometric',
                        frame: list[float] | None = None, fit: bool = True,
                        occurrence_paths: list[list[str]] | None = None, camera_id: str = '', extents: list[float] | None = None,
-                       plane: dict | None = None, face: str = '', part_ids: list[str] | None = None, detail: Literal['summary','full'] = 'summary') -> str:
+                       plane: dict | None = None, face: str = '', part_ids: list[str] | None = None, box_mm: list[float] | None = None,
+                       detail: Literal['summary','full'] = 'summary') -> str:
     """Read/control the actual editor camera, fit the model, or zoom to exact assembly occurrence paths. save returns a camera_id for restore in the same tab, including zoom. Writes require a fresh microversion and return observed camera state. orientation takes a right-handed orthonormal 4x4 column-major camera frame (right/up/back columns, eye in meters), not a world-to-camera view matrix. fit=true also fits standard/orientation/normal_to views. With fit=false, optional orthographic extents from readback restore scale after reload, adjusted to viewport aspect ratio. Works on Part Studios and assemblies. Compact acknowledgements save full camera state for artifact_page; read or detail=full includes matrices. No button clicks.
-normal_to/section take plane {origin:[x,y,z] meters or "center" (this element's bounding-box centre), normal, x_dir?} or face (Part Studio FeatureScript Query or face ID, e.g. qCreatedBy(makeId("Top"), EntityType.FACE)); a face uses its tangent plane at the centroid, outward normal. normal_to looks against the normal (from its + side) via Onshape's normal-to camera. section sets Onshape's graphical section with one plane (material on the + normal side stays), saving the prior section planes once; section_off restores them. isolate/make_transparent take assembly occurrence_paths or Part Studio part_ids; exit_isolate/exit_make_transparent restore. Always restore before finishing."""
+normal_to/section take plane {origin:[x,y,z] meters or "center" (this element's bounding-box centre), normal, x_dir?} or face (Part Studio FeatureScript Query or face ID, e.g. qCreatedBy(makeId("Top"), EntityType.FACE)); a face uses its tangent plane at the centroid, outward normal. normal_to looks against the normal (from its + side) via Onshape's normal-to camera. section sets Onshape's graphical section with one plane (material on the + normal side stays), saving the prior section planes once; section_off restores them. isolate/make_transparent take assembly occurrence_paths or Part Studio part_ids; exit_isolate/exit_make_transparent restore. Always restore before finishing.
+zoom takes exactly one of occurrence_paths, part_ids, or box_mm [xmin,ymin,zmin,xmax,ymax,zmax] in the element frame (e.g. an interference_check overlap box), framed with a 20% margin; then capture_viewport for a close-up."""
     from .display import Display, resolve_plane
     args={'action':action}
     if action=='standard': args.update(view=view,fit=fit)
@@ -616,10 +637,23 @@ normal_to/section take plane {origin:[x,y,z] meters or "center" (this element's 
     if action in ('isolate','make_transparent'):
         args.update({'part_ids':part_ids} if part_ids is not None else {'occurrence_paths':occurrence_paths})
     if extents is not None: args['extents']=extents
-    if action=='zoom': args['occurrence_paths']=occurrence_paths
+    if action=='zoom':  # the display validator requires exactly one target
+        if box_mm is not None: args['box']=zoom_box(box_mm)
+        if part_ids is not None: args['part_ids']=part_ids
+        if occurrence_paths is not None: args['occurrence_paths']=occurrence_paths
     if action=='restore': args['camera_id']=camera_id
     result=await Display(svc()).operation(url,'camera',args,tab_id,expected_microversion)
     return compact(result if detail=='full' or action=='read' else respond(svc().store,result,kind='camera'))
+
+
+def zoom_box(box_mm):
+    """A box in mm (element frame) as metres, grown by 20% of its size on each side (at least 1 mm) so the region is not
+    flush with the viewport edge."""
+    if not isinstance(box_mm, list) or len(box_mm) != 6 or any(type(v) not in (int, float) or not math.isfinite(v) for v in box_mm) \
+            or any(box_mm[i] > box_mm[i + 3] for i in range(3)):
+        raise OnshapeError('box_mm is [xmin, ymin, zmin, xmax, ymax, zmax] in mm.')
+    pad = [max(0.2 * (box_mm[i + 3] - box_mm[i]), 1.0) for i in range(3)]
+    return [(box_mm[i] - pad[i]) / 1000 for i in range(3)] + [(box_mm[i + 3] + pad[i]) / 1000 for i in range(3)]
 
 
 @mcp.tool(structured_output=False, annotations=READ)
