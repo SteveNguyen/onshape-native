@@ -34,9 +34,9 @@ class Structures:
             raise OnshapeError("Use a matching snapshot from document_tree or element_tree.")
         return data
 
-    async def capture_document(self, url):
+    async def capture_document(self, url, micro=None):
         target = target_from_url(url)
-        micro = await self.microversion(target)
+        micro = micro or await self.microversion(target)
         content = await self.s.call("getDocumentContents", {"did": target["did"], "wvm": "m", "wvmid": micro})
         rows, issues = document_rows(content, target, micro)
         return {"kind": "onshape-structure", "tree_kind": "document", "url": url, "target": target,
@@ -69,7 +69,14 @@ class Structures:
     async def capture_element(self, url):
         target = target_from_url(url)
         if not target["eid"]: raise OnshapeError("element_tree needs an /e/EID URL.")
-        document = await self.capture_document(url)
+        # A workspace sidebar is read from the open editor anyway: its revision replaces the REST revision lookup, and
+        # the reads pinned to it are served from the client cache while nothing changes. After one of our REST writes
+        # the editor may lag; then the REST revision is used and the check below refuses a mismatched editor.
+        native = await self.ready_state(target) if target["wvm"] == "w" and not target["configuration"] else None
+        written = self.s.written.get((target["did"], target["wvmid"]))
+        trusted = native and re.fullmatch(r"[a-f0-9]{24}", native.get("microversion") or "") and \
+            native.get("connected", True) and (not written or native["microversion"] == written)
+        document = await self.capture_document(url, native["microversion"] if trusted else None)
         element = next((e for e in document["contents"]["elements"] if e["id"] == target["eid"]), None)
         if element is None: raise OnshapeError("Element is absent at this revision.")
         kind = element["elementType"]
@@ -79,8 +86,7 @@ class Structures:
             definition = await self.s.call("getAssemblyDefinition", pinned, {"configuration": target["configuration"], "includeMateFeatures": True, "includeMateConnectors": True, "includeNonSolids": True, "excludeSuppressed": False})
             rows, issues = assembly_rows(definition)
             occurrences_complete = not issues
-            if target["wvm"] == "w" and not target["configuration"]:
-                native = await self.ready_state(target)
+            if native:
                 if native["microversion"] != data["microversion"]:
                     raise OnshapeError("Document changed during assembly sidebar snapshot. Refresh element_tree.")
                 sidebar, sidebar_issues = assembly_sidebar_rows(native)
@@ -108,8 +114,7 @@ class Structures:
                         occurrences_complete=occurrences_complete, sidebar_complete=not sidebar_issues, complete=not (issues+sidebar_issues))
         elif kind == "PARTSTUDIO":
             features = await self.s.call("getPartStudioFeatures", pinned, {"configuration": target["configuration"], "noSketchGeometry": True})
-            if target["wvm"] == "w" and not target["configuration"]:
-                native = await self.ready_state(target)
+            if native:
                 if native["microversion"] != data["microversion"]:
                     raise OnshapeError("Document changed during sidebar snapshot. Read element_tree again.")
                 rows, issues = feature_rows(native, features)

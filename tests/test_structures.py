@@ -143,7 +143,7 @@ class FakeClient:
     async def command(self, job):
         self.sent.append(job)
         if job["kind"]=="open":return {"tab_id":1}
-        if job["kind"]=="state":return {"microversion":M,"editingFeatureId":None}
+        if job["kind"]=="state":return {"microversion":M,"editingFeatureId":None,"tree":{"children":[feat("A")]}}
         if job["kind"]=="schema":return {"defaults":{"nodeId":"new-folder"}}
         return {"result":{"ack":True},"microversion_before":M,"microversion_after":M}
 
@@ -151,11 +151,28 @@ class FakeClient:
 class FakeService:
     def __init__(self, tmp_path):
         self.store=Store(tmp_path);self.client=FakeClient();self.catalog=Catalog();self.micro=M;self.calls=[];self.content=contents()
+        self.written={}
     async def call(self, name, path, query=None, body=None):
         self.calls.append((name,path,query,body))
         if name=="getCurrentMicroversion":return {"microversion":self.micro}
         if name=="getDocumentContents":return copy.deepcopy(self.content)
+        if name=="getPartStudioFeatures":return {"features":[{"featureId":"A"}],"featureStates":{"A":{"featureStatus":"OK"}}}
         raise AssertionError(name)
+
+
+async def test_workspace_element_tree_takes_the_revision_from_the_open_editor(tmp_path):
+    s=FakeService(tmp_path);a=Structures(s)
+    tree=await a.element_tree(URL)
+    assert [n for n,*_ in s.calls]==["getDocumentContents","getPartStudioFeatures"]  # no REST revision lookup
+    assert all(p["wvm"]=="m" and p["wvmid"]==M for _,p,*_ in s.calls)
+    assert any(r.get("feature_id")=="A" for r in a.load(tree["snapshot"])["rows"])
+
+
+async def test_editor_lagging_behind_our_rest_write_is_not_trusted(tmp_path):
+    s=FakeService(tmp_path);a=Structures(s)
+    s.micro=OLD;s.written[(D,W)]=OLD  # our write produced OLD; the editor still shows M
+    with pytest.raises(OnshapeError,match="Document changed"): await a.element_tree(URL)
+    assert s.calls[0][0]=="getCurrentMicroversion"
 
 
 async def test_pinned_document_reads_local_snapshot_paging_and_wrong_url(tmp_path):
