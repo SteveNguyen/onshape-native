@@ -440,12 +440,16 @@ async def interference_check(url: str, occurrence_paths: list[list[str]] | None 
 
 
 @mcp.tool(structured_output=False, annotations=READ)
-async def measure_fit(url: str, a: dict, b: dict, expect_mm: list[float] | None = None, tab_id: int | None = None) -> str:
+async def measure_fit(url: str, a: dict, b: dict, fit: Literal["cylinder", "planar"], expect_mm: list[float] | None = None,
+                      tab_id: int | None = None) -> str:
     """Verify one named fit with Onshape's own Measure tool in the open editor tab (read-only, no REST): two faces you know
-    should fit, e.g. a bore and its shaft, or two flat faces. Entities: {face_id} in a Part Studio, {occurrence_path,
-    face_id} in an assembly (face IDs from evaluate topology in the part's Part Studio). Cylinder pairs: bore/shaft
-    diameters, diametral clearance, tightest radial gap, axis offset and angle. Parallel faces: gap. Any pair: min/max
-    distance and angle. expect_mm=[min, max] checks the diametral clearance or the gap; there is no default."""
+    should fit. Entities: {face_id} in a Part Studio, {occurrence_path, face_id} in an assembly (face IDs from evaluate
+    topology in the part's Part Studio). fit="cylinder" (bore and shaft): diameters, diametral clearance, tightest radial
+    gap, axis offset. fit="planar" (two flat faces): gap. Both: min/max distance. expect_mm=[min, max] checks the
+    diametral clearance or the gap; there is no default. Parallelism is not measured (Measure's angle is unreliable):
+    it is the premise of the declared fit."""
+    if fit not in ("cylinder", "planar"):
+        raise OnshapeError('fit is "cylinder" (bore and shaft) or "planar" (two flat faces).')
     s = svc()
     target = native_target(url)
     replies = []
@@ -453,7 +457,7 @@ async def measure_fit(url: str, a: dict, b: dict, expect_mm: list[float] | None 
         data = await s.client.command({"kind": "native", "target": target, "command": measure.COMMAND,
                                        "body": {"entityQueries": [measure.query(e) for e in entities]}, "tab_id": tab_id})
         replies.append(data)
-    report = {**measure.fit(*(r.get("result") or {} for r in replies), expect_mm=expect_mm),
+    report = {**measure.fit(fit, *(r.get("result") or {} for r in replies), expect_mm=expect_mm),
               "revision_unchanged": len({r.get("microversion_before") for r in replies} | {r.get("microversion_after") for r in replies}) == 1}
     return compact(s.store.response(report))
 
