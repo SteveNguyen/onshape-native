@@ -7,10 +7,14 @@ from onshape_native import measure
 from onshape_native.client import OnshapeError
 
 
+TYPE = {"Min dist:": 4, "Max dist:": 3, "Angle:": 15, "Area:": 19, "Diameter:": 11, "Radius:": 12, "Parallel axis distance:": 7}
+
+
 def reply(*items, error=0):
     """A ui.GBTUiMeasureEntitiesResponse with (measurementId, value in metres or radians) items."""
     return {"$type": "ui.GBTUiMeasureEntitiesResponse", "error": error,
-            "measurements": [{"measurementId": name, "value": value, "startPoint": {"x": 0, "y": 0, "z": 0}} for name, value in items]}
+            "measurements": [{"measurementId": name, "measurementType": TYPE[name], "value": value,
+                              "startPoint": {"x": 0, "y": 0, "z": 0}} for name, value in items]}
 
 
 def cylinder(d):
@@ -112,3 +116,14 @@ def test_tool_measures_each_face_then_the_pair_and_reports_the_revision(monkeypa
     assert all(j["command"] == "ui.GBTUiMeasureCall" and j["kind"] == "native" for j in sent)
     assert [q["path"] for q in sent[2]["body"]["entityQueries"]] == [["Mbore"], ["Mshaft"]]
     assert out["kind"] == "cylindrical" and out["in_range"] is True and out["revision_unchanged"] is True
+
+
+def test_axis_offset_measured_by_onshape_is_used_as_is():
+    pair = reply(("Min dist:", 0.00006), ("Angle:", 0.0), ("Parallel axis distance:", 0.00003))
+    out = measure.fit(cylinder(0.0102), cylinder(0.01), pair)
+    assert out["axis_offset_mm"] == pytest.approx(0.03) and "note" not in out
+
+
+def test_values_are_keyed_by_measurement_type_not_the_translated_label():
+    translated = {"error": 0, "measurements": [{"measurementId": "Dist. min :", "measurementType": 4, "value": 0.002}]}
+    assert measure.values(translated) == {"min dist": 0.002}

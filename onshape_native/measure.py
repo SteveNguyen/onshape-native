@@ -1,7 +1,8 @@
 """Onshape's own Measure tool (the editor's ui.GBTUiMeasureCall) applied to one named fit.
 
 Observed replies (2026-10-29): one cylinder gives Diameter/Radius/Area; two entities give Min dist, Max dist, Angle and
-Area. Values are metres (angles radians). Closest points come back as zeros, so none are reported.
+Area. Values are metres. Angles are taken as radians, like every other angle in the editor's messages (only 0 was
+observed). Closest points come back as zeros, so none are reported.
 """
 from __future__ import annotations
 
@@ -15,6 +16,10 @@ COMMAND = "ui.GBTUiMeasureCall"
 FACE_ID = re.compile(r"[A-Za-z0-9_.+/=-]{1,64}")
 OCCURRENCE_ID = re.compile(r"[A-Za-z0-9+/=]{1,64}")
 PARALLEL = 1e-4  # rad (~0.006 deg): axes or faces this close to parallel count as parallel
+# The editor's measurement types (GBTMeasurementType); labels like "Min dist:" are translated, these are not.
+TYPES = {0: "center position", 1: "position", 2: "center distance", 3: "max dist", 4: "min dist", 5: "perpendicular distance",
+         6: "axis perpendicular distance", 7: "parallel axis distance", 8: "parallel distance", 9: "center axis distance",
+         10: "length", 11: "diameter", 12: "radius", 13: "max radius", 14: "min radius", 15: "angle", 19: "area"}
 
 mm = lambda metres: round(metres * 1000, 6)
 
@@ -37,7 +42,8 @@ def values(reply):
     """{'min dist': metres, 'diameter': metres, 'angle': radians, ...} from one Measure reply."""
     if reply.get("error"):
         raise OnshapeError(f"Onshape Measure refused the selection (error {reply['error']}); check the face IDs and occurrence paths.")
-    return {m["measurementId"].rstrip(":").strip().lower(): m["value"] for m in reply.get("measurements", []) if "value" in m}
+    return {TYPES.get(m.get("measurementType"), f"type {m.get('measurementType')}"): m["value"]
+            for m in reply.get("measurements", []) if "value" in m}
 
 
 def fit(single_a, single_b, pair, expect_mm=None):
@@ -57,6 +63,8 @@ def fit(single_a, single_b, pair, expect_mm=None):
                    min_radial_gap_mm=out["min_dist_mm"], axis_offset_mm=None, checked="diametral_clearance_mm")
         if not parallel:
             out["note"] = "Axes are not parallel: the axis offset is not derived."
+        elif "parallel axis distance" in both:
+            out["axis_offset_mm"] = mm(both["parallel axis distance"])  # measured by Onshape
         elif both.get("min dist", 0.0) <= 0:
             out["note"] = "The cylinders touch or overlap: the axis offset is not derivable from Measure."
         else:
